@@ -1,0 +1,14 @@
+fastapi>=0.116,<1.0
+uvicorn[standard]>=0.35,<1.0
+SQLAlchemy>=2.0,<3.0
+alembic>=1.16,<2.0
+PyMySQL>=1.1,<2.0
+cryptography>=45,<47
+pydantic-settings>=2.10,<3.0
+python-multipart>=0.0.20,<1.0
+openpyxl>=3.1,<4.0
+Pillow>=11,<13
+openai>=1.99,<3.0
+httpx>=0.28,<1.0
+pytest>=8.4,<10.0
+
