@@ -46,11 +46,43 @@ class CandidateRead(BaseModel):
     review_note: str | None
 
 
+class ImageSourceRegionRead(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+    image_width: int
+    image_height: int
+    precise: bool
+
+
+class CandidateSourcePreview(BaseModel):
+    source_type: SourceType
+    filename: str
+    sheet_name: str | None
+    cell_address: str | None
+    raw_text: str
+    image_url: str | None = None
+    region: ImageSourceRegionRead | None = None
+    message: str | None = None
+
+
+class CandidateFilterSummary(BaseModel):
+    all: int
+    pending: int
+    low_confidence: int
+    incomplete: int
+    approved: int
+    rejected: int
+    merged_source_groups: int = 0
+
+
 class CandidatePage(BaseModel):
     items: list[CandidateRead]
     total: int
     page: int
     page_size: int
+    summary: CandidateFilterSummary
 
 
 class CandidateUpdate(BaseModel):
@@ -65,6 +97,22 @@ class CandidateUpdate(BaseModel):
     price: Decimal | None = Field(default=None, ge=0)
     review_status: ReviewStatus | None = None
     review_note: str | None = Field(default=None, max_length=500)
+
+
+class SourceLineReparseRequest(BaseModel):
+    raw_text: str = Field(min_length=3, max_length=2000)
+
+
+class SourceGroupCandidateInput(CandidateUpdate):
+    id: int | None = None
+
+
+class SourceGroupReplaceRequest(BaseModel):
+    items: list[SourceGroupCandidateInput] = Field(min_length=1, max_length=80)
+
+
+class BatchQuoteDateUpdate(BaseModel):
+    quote_date: date
 
 
 class BulkReviewRequest(BaseModel):
@@ -116,6 +164,7 @@ class PriceChangeRead(BaseModel):
     previous_price: Decimal | None
     change_amount: Decimal | None
     change_percent: float | None
+    requires_review: bool = False
 
 
 class TrendPoint(BaseModel):
@@ -132,4 +181,3 @@ class DashboardSummary(BaseModel):
     today_unchanged: int
     top_increases: list[PriceChangeRead]
     top_decreases: list[PriceChangeRead]
-

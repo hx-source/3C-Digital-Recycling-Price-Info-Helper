@@ -19,6 +19,9 @@ from app.schemas.quotes import DashboardSummary, PriceChangeRead
 from app.services.normalizer import model_key, normalize_model
 
 
+ABNORMAL_CHANGE_THRESHOLD = Decimal("500")
+
+
 def update_candidate(candidate: QuoteCandidate, payload: dict[str, object]) -> QuoteCandidate:
     for field, value in payload.items():
         setattr(candidate, field, value)
@@ -125,6 +128,7 @@ def price_changes(
         previous_price = Decimal(previous.price) if previous and previous.price is not None else None
         change = current_price - previous_price if previous_price is not None else None
         percent = float(change / previous_price * 100) if change is not None and previous_price else None
+        requires_review = change is not None and abs(change) >= ABNORMAL_CHANGE_THRESHOLD
         output.append(
             PriceChangeRead(
                 model_key=key,
@@ -139,6 +143,7 @@ def price_changes(
                 previous_price=previous_price,
                 change_amount=change,
                 change_percent=round(percent, 2) if percent is not None else None,
+                requires_review=requires_review,
             )
         )
     output.sort(key=lambda item: (item.current_date, abs(item.change_amount or 0)), reverse=True)
@@ -159,7 +164,10 @@ def dashboard_summary(db: Session) -> DashboardSummary:
         )
     ) or 0
     changes = price_changes(db, as_of=latest_date, limit=5000) if latest_date else []
-    today = [item for item in changes if item.current_date == latest_date and item.change_amount is not None]
+    today = [
+        item for item in changes
+        if item.current_date == latest_date and item.change_amount is not None and not item.requires_review
+    ]
     increases = sorted((item for item in today if item.change_amount and item.change_amount > 0), key=lambda x: x.change_amount, reverse=True)
     decreases = sorted((item for item in today if item.change_amount and item.change_amount < 0), key=lambda x: x.change_amount)
     unchanged = sum(1 for item in today if item.change_amount == 0)
@@ -173,4 +181,3 @@ def dashboard_summary(db: Session) -> DashboardSummary:
         top_increases=increases[:8],
         top_decreases=decreases[:8],
     )
-

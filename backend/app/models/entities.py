@@ -85,6 +85,15 @@ class QuoteCandidate(Base):
     cell_address: Mapped[str | None] = mapped_column(String(40), nullable=True)
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
     source_line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Source rectangles are captured while the image OCR result is still in memory.
+    # Keeping them on the candidate means opening the original image never needs OCR again.
+    source_x: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_y: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_image_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_image_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_region_precise: Mapped[bool | None] = mapped_column(nullable=True)
     quote_date: Mapped[date] = mapped_column(Date, nullable=False)
     category: Mapped[str] = mapped_column(String(80), nullable=False, default="手机")
     brand: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -137,4 +146,3 @@ class PriceQuote(Base):
 
     batch: Mapped[ImportBatch] = relationship(back_populates="quotes")
     candidate: Mapped[QuoteCandidate] = relationship(back_populates="quote")
-

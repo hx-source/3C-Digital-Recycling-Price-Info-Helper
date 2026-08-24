@@ -69,6 +69,7 @@ SHEET_META: dict[str, tuple[str, str]] = {
     "华为平板": ("Huawei", "平板"),
     "华为系列": ("Huawei", "手机"),
     "华为融合": ("Huawei", "配件/穿戴"),
+    "华为融合系列": ("Huawei", "配件/穿戴"),
     "OPPO": ("OPPO", "手机"),
     "VIVO": ("vivo", "手机"),
     "红米小米": ("Xiaomi", "手机/平板"),
@@ -98,6 +99,13 @@ class ParsedCandidate:
     sheet_name: str | None = None
     cell_address: str | None = None
     source_line: int | None = None
+    source_x: int | None = None
+    source_y: int | None = None
+    source_width: int | None = None
+    source_height: int | None = None
+    source_image_width: int | None = None
+    source_image_height: int | None = None
+    source_region_precise: bool | None = None
 
 
 def infer_brand(sheet_name: str, text: str) -> str:

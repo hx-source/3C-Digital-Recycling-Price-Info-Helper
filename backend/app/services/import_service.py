@@ -20,7 +20,7 @@ from app.models.entities import (
     SourceType,
 )
 from app.services.excel_importer import ExcelQuoteImporter
-from app.services.ocr_provider import ManualTextOcrProvider, OcrConfigurationError, OpenAIVisionOcrProvider
+from app.services.ocr_provider import ManualTextOcrProvider, OcrConfigurationError, RapidOcrTableProvider
 from app.services.parser import PARSER_VERSION, ParsedCandidate
 
 
@@ -56,30 +56,38 @@ def detect_source_type(filename: str) -> SourceType:
     raise ValueError("仅支持 xlsx、xlsm、png、jpg、jpeg、webp 文件")
 
 
+def candidate_from_parsed(batch_id: int, item: ParsedCandidate) -> QuoteCandidate:
+    return QuoteCandidate(
+        batch_id=batch_id,
+        sheet_name=item.sheet_name,
+        cell_address=item.cell_address,
+        raw_text=item.raw_text,
+        source_line=item.source_line,
+        source_x=item.source_x,
+        source_y=item.source_y,
+        source_width=item.source_width,
+        source_height=item.source_height,
+        source_image_width=item.source_image_width,
+        source_image_height=item.source_image_height,
+        source_region_precise=item.source_region_precise,
+        quote_date=item.quote_date,
+        category=item.category,
+        brand=item.brand,
+        model=item.model,
+        model_normalized=item.model_normalized,
+        storage=item.storage,
+        color=item.color,
+        variant=item.variant,
+        price_status=item.price_status,
+        price=item.price,
+        confidence=item.confidence,
+        review_status=ReviewStatus.PENDING,
+        parser_version=PARSER_VERSION,
+    )
+
+
 def _persist_candidates(db: Session, batch: ImportBatch, items: list[ParsedCandidate]) -> None:
-    records = [
-        QuoteCandidate(
-            batch_id=batch.id,
-            sheet_name=item.sheet_name,
-            cell_address=item.cell_address,
-            raw_text=item.raw_text,
-            source_line=item.source_line,
-            quote_date=item.quote_date,
-            category=item.category,
-            brand=item.brand,
-            model=item.model,
-            model_normalized=item.model_normalized,
-            storage=item.storage,
-            color=item.color,
-            variant=item.variant,
-            price_status=item.price_status,
-            price=item.price,
-            confidence=item.confidence,
-            review_status=ReviewStatus.PENDING,
-            parser_version=PARSER_VERSION,
-        )
-        for item in items
-    ]
+    records = [candidate_from_parsed(batch.id, item) for item in items]
     db.add_all(records)
     batch.total_candidates = len(records)
     batch.valid_candidates = sum(1 for item in items if item.model and item.brand)
@@ -113,8 +121,8 @@ def create_import(
         if source_type == SourceType.EXCEL:
             items = ExcelQuoteImporter().parse(path, fallback_date)
         else:
-            provider = ManualTextOcrProvider(manual_text) if manual_text else OpenAIVisionOcrProvider()
-            items = provider.recognize(path, fallback_date, image_sheet_name or "VIVO")
+            provider = ManualTextOcrProvider(manual_text) if manual_text else RapidOcrTableProvider()
+            items = provider.recognize(path, fallback_date, image_sheet_name)
         _persist_candidates(db, batch, items)
     except OcrConfigurationError as exc:
         batch.status = BatchStatus.NEEDS_OCR
@@ -128,7 +136,7 @@ def create_import(
 
 
 def reparse_image(
-    db: Session, batch: ImportBatch, manual_text: str, image_sheet_name: str, quote_date: date | None
+    db: Session, batch: ImportBatch, manual_text: str, image_sheet_name: str | None, quote_date: date | None
 ) -> ImportBatch:
     if batch.source_type != SourceType.IMAGE:
         raise ValueError("只有图片批次支持人工文本重解析")

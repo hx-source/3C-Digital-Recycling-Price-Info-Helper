@@ -8,7 +8,7 @@
 - 本机 Python 环境：`D:\anaconda3\envs\price-radar`
 - 已导入草稿：批次 `#1`，2093 条候选，状态 `review`
 - Excel：直接解析工作簿，按工作表识别报价日期、品类和品牌
-- 图片：支持 OpenAI Vision 识别；没有 API Key 时保留图片，并允许粘贴人工识别文本重解析
+- 图片：支持一次上传多张；每张图片独立建档，使用本地 OpenCV 表格定位 + RapidOCR 识别，不需要 API Key，并自动判断 VIVO、OPPO、红米小米等板块
 - 无报价：`no_quote`；星号遮挡：`masked`；两类记录都会保留，但不参与涨跌统计
 - 涨跌口径：当前明确报价与此前最近一条明确报价比较
 
@@ -64,7 +64,7 @@ conda activate D:\anaconda3\envs\price-radar
 pip install -r .\backend\requirements.txt
 
 Copy-Item .\backend\.env.example .\backend\.env
-# 编辑 backend/.env，填写 DATABASE_URL；如需自动图片识别，再填写 OPENAI_API_KEY
+# 编辑 backend/.env，填写 DATABASE_URL
 
 Set-Location .\backend
 alembic upgrade head
@@ -84,8 +84,8 @@ CREATE DATABASE price_radar CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 ## 使用流程
 
-1. 在「数据导入」选择 Excel 或图片并上传。
-2. Excel 会直接生成候选；图片有 API Key 时自动识别，没有时可粘贴人工识别文本。
+1. 在「数据导入」一次选择多张报价图片或 Excel 文件并上传。
+2. Excel 会直接生成候选；图片使用本地 RapidOCR 自动识别，无需 API Key。每张图片根据 OCR 文字自动判断所属板块，并独立生成一个复核批次。
 3. 在「复核工作台」查看原文、来源单元格、置信度、型号、规格、颜色、价格状态和价格。
 4. 逐条修正或批量通过/拒绝。
 5. 点击「发布报价」后写入正式历史。
@@ -96,6 +96,7 @@ CREATE DATABASE price_radar CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 ## 主要接口
 
 - `POST /api/v1/imports`：上传 Excel 或图片
+- `POST /api/v1/imports/bulk`：批量上传（单次最多 30 个文件）
 - `GET /api/v1/imports/{id}/candidates`：分页查看识别候选
 - `PATCH /api/v1/imports/candidates/{candidate_id}`：人工修正
 - `POST /api/v1/imports/{id}/review-all`：批量复核

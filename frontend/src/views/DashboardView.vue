@@ -25,14 +25,14 @@ function renderChart() {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     xAxis: {
       type: 'value',
-      axisLine: { lineStyle: { color: '#b9c8c1' } },
-      splitLine: { lineStyle: { color: '#dce6e1' } },
-      axisLabel: { color: '#5e6f69' },
+      axisLine: { lineStyle: { color: '#d7dee5' } },
+      splitLine: { lineStyle: { color: '#edf0f3' } },
+      axisLabel: { color: '#667382' },
     },
     yAxis: {
       type: 'category',
       data: rows.map(item => `${item.model} ${item.storage || ''} ${item.color || ''}`),
-      axisLabel: { color: '#173c36', width: 110, overflow: 'truncate' },
+      axisLabel: { color: '#26313d', width: 110, overflow: 'truncate' },
       axisTick: { show: false },
       axisLine: { show: false },
     },
@@ -40,7 +40,7 @@ function renderChart() {
       type: 'bar',
       data: rows.map(item => ({
         value: item.change_amount,
-        itemStyle: { color: (item.change_amount || 0) >= 0 ? '#df4f43' : '#187d68', borderRadius: [3, 3, 3, 3] },
+        itemStyle: { color: (item.change_amount || 0) >= 0 ? '#e33f32' : '#27916b', borderRadius: [2, 2, 2, 2] },
       })),
       barWidth: 12,
     }],

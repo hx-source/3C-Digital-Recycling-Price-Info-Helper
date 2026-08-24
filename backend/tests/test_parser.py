@@ -20,6 +20,20 @@ def test_parses_multiple_color_prices() -> None:
     assert all(item.storage == "12+256" for item in items)
 
 
+def test_human_corrected_source_line_can_restore_a_missing_color() -> None:
+    items = parse_text_line(
+        "P90Pro 12+256 黑4680白4750橙4700粉4800",
+        sheet_name="华为系列",
+        quote_date=QUOTE_DATE,
+    )
+    assert [(item.color, item.price) for item in items] == [
+        ("黑", Decimal("4680")),
+        ("白", Decimal("4750")),
+        ("橙", Decimal("4700")),
+        ("粉", Decimal("4800")),
+    ]
+
+
 def test_preserves_no_quote() -> None:
     items = parse_text_line(
         "X300pro 12+256",

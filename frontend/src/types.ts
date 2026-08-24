@@ -22,6 +22,7 @@ export interface Candidate {
   sheet_name: string | null
   cell_address: string | null
   raw_text: string
+  source_line: number | null
   quote_date: string
   category: string
   brand: string
@@ -42,6 +43,38 @@ export interface CandidatePage {
   total: number
   page: number
   page_size: number
+  summary: CandidateFilterSummary
+}
+
+export interface ImageSourceRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+  image_width: number
+  image_height: number
+  precise: boolean
+}
+
+export interface CandidateSourcePreview {
+  source_type: 'excel' | 'image'
+  filename: string
+  sheet_name: string | null
+  cell_address: string | null
+  raw_text: string
+  image_url: string | null
+  region: ImageSourceRegion | null
+  message: string | null
+}
+
+export interface CandidateFilterSummary {
+  all: number
+  pending: number
+  low_confidence: number
+  incomplete: number
+  approved: number
+  rejected: number
+  merged_source_groups: number
 }
 
 export interface Quote {
@@ -72,6 +105,7 @@ export interface PriceChange {
   previous_price: number | null
   change_amount: number | null
   change_percent: number | null
+  requires_review: boolean
 }
 
 export interface DashboardSummary {
@@ -84,4 +118,3 @@ export interface DashboardSummary {
   top_increases: PriceChange[]
   top_decreases: PriceChange[]
 }
-

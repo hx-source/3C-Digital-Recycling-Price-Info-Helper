@@ -28,6 +28,10 @@ function signed(value: number | null) {
   return `${value > 0 ? '+' : ''}${value}`
 }
 
+function priceStatusLabel(status: string) {
+  return { quoted: '明确报价', no_quote: '暂无报价', masked: '价格遮挡' }[status] || status
+}
+
 onMounted(load)
 </script>
 
@@ -40,16 +44,16 @@ onMounted(load)
 
     <div class="tab-switch"><button :class="{ active: tab === 'changes' }" @click="tab = 'changes'">涨跌比较</button><button :class="{ active: tab === 'history' }" @click="tab = 'history'">报价流水</button></div>
 
-    <div class="data-table-wrap">
+    <div class="data-table-wrap ledger-scroll">
       <table v-if="tab === 'changes'" class="market-table change-table">
         <thead><tr><th>型号</th><th>规格</th><th>本期</th><th>上期</th><th>涨跌额</th><th>涨跌幅</th><th>日期</th></tr></thead>
         <tbody>
-          <tr v-for="row in changes" :key="row.model_key">
+          <tr v-for="row in changes" :key="row.model_key" :class="{ abnormal: row.requires_review }">
             <td><b>{{ row.brand }}</b><br><span>{{ row.model }} {{ row.color || '' }}</span></td>
             <td>{{ row.storage || '—' }}<small v-if="row.variant">{{ row.variant }}</small></td>
             <td><strong>¥{{ row.current_price }}</strong></td>
             <td>{{ row.previous_price === null ? '—' : `¥${row.previous_price}` }}</td>
-            <td><em :class="(row.change_amount || 0) >= 0 ? 'up' : 'down'">{{ signed(row.change_amount) }}</em></td>
+            <td><em :class="(row.change_amount || 0) >= 0 ? 'up' : 'down'">{{ signed(row.change_amount) }}</em><small v-if="row.requires_review" class="abnormal-flag">异常待复核</small></td>
             <td>{{ row.change_percent === null ? '—' : `${signed(row.change_percent)}%` }}</td>
             <td>{{ row.current_date }}<small v-if="row.previous_date">对比 {{ row.previous_date }}</small></td>
           </tr>
@@ -64,11 +68,10 @@ onMounted(load)
             <td>{{ row.quote_date }}</td><td>{{ row.source_name }}</td><td>{{ row.category }}</td>
             <td><b>{{ row.brand }}</b><br>{{ row.model }}</td><td>{{ row.storage || '—' }}</td>
             <td>{{ [row.color, row.variant].filter(Boolean).join(' · ') || '—' }}</td>
-            <td><span class="price-state">{{ row.price_status }}</span></td><td><strong>{{ row.price === null ? '—' : `¥${row.price}` }}</strong></td>
+            <td><span class="price-state">{{ priceStatusLabel(row.price_status) }}</span></td><td><strong>{{ row.price === null ? '—' : `¥${row.price}` }}</strong></td>
           </tr>
         </tbody>
       </table>
     </div>
   </section>
 </template>
-
