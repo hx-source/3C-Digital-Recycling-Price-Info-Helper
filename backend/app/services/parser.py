@@ -9,7 +9,7 @@ from app.models.entities import PriceStatus
 from app.services.normalizer import normalize_model, normalize_storage
 
 
-PARSER_VERSION = "v1.1"
+PARSER_VERSION = "v1.2"
 
 STORAGE_RE = re.compile(
     r"(?P<ram>\d{1,2})\s*[+＋/]\s*(?P<capacity>\d{2,4})\s*(?P<unit>GB|G|TB|T|g|t)?",
@@ -41,7 +41,10 @@ BRAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "Huawei": ("Huawei", "华为"),
     "Honor": ("Honor", "荣耀"),
     "OPPO": ("OPPO",),
-    "OnePlus": ("OnePlus", "一加"),
+    # OCR occasionally loses the leading "一" in OnePlus models, for example
+    # "一加Ace5" becomes "加Ace5".  The short "加" prefix is only stripped
+    # after infer_brand has positively identified a OnePlus-style model.
+    "OnePlus": ("OnePlus", "一加", "1+", "加"),
     "realme": ("realme", "真我"),
     "vivo": ("vivo",),
     "iQOO": ("iQOO", "iQ00"),
@@ -55,6 +58,12 @@ BRAND_PREFIXES: dict[str, tuple[str, ...]] = {
     "Canon": ("Canon", "佳能"),
     "Logitech": ("Logitech", "罗技"),
 }
+
+ONEPLUS_PREFIX_RE = re.compile(r"^\s*(?:一加|oneplus|1[+＋])", re.IGNORECASE)
+ONEPLUS_MISSING_YI_RE = re.compile(
+    r"^\s*加\s*(?=(?:ace|turbo|nord|\d))",
+    re.IGNORECASE,
+)
 
 SKIP_PREFIXES = (
     "注：", "注:", "注意", "地址", "所有机器", "大盘表", "邮寄地址", "白天业务", "退货模板", "寄存模板"
@@ -110,7 +119,7 @@ class ParsedCandidate:
 
 def infer_brand(sheet_name: str, text: str) -> str:
     lower = text.lower()
-    if "一加" in text or "oneplus" in lower:
+    if ONEPLUS_PREFIX_RE.search(text) or ONEPLUS_MISSING_YI_RE.search(text):
         return "OnePlus"
     if "真我" in text or "realme" in lower:
         return "realme"

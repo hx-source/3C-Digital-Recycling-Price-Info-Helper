@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Batch, Candidate, CandidatePage, CandidateSourcePreview, DashboardSummary, PriceChange, PriceStatus, Quote, ReviewStatus } from './types'
+import type { Batch, Candidate, CandidatePage, CandidateSourcePreview, DashboardSummary, ExcelPrecheckResult, PriceChange, PriceStatus, Quote, ReviewStatus } from './types'
 
 const api = axios.create({ baseURL: '/api/v1', timeout: 120_000 })
 
@@ -23,8 +23,16 @@ export const apiClient = {
   async uploadBulk(form: FormData) {
     return (await api.post<Batch[]>('/imports/bulk', form)).data
   },
+  async precheckExcel(form: FormData) {
+    return (await api.post<ExcelPrecheckResult>('/imports/precheck-excel', form)).data
+  },
   async deleteBatch(batchId: number) {
     return (await api.delete<{ deleted_batches: number; deleted_candidates: number }>(`/imports/${batchId}`)).data
+  },
+  async purgeAllData(confirmation: string) {
+    return (await api.delete<{ deleted_batches: number; deleted_candidates: number; deleted_quotes: number }>('/imports/purge-all', {
+      data: { confirmation },
+    })).data
   },
   async updateBatchQuoteDate(batchId: number, quoteDate: string) {
     return (await api.patch<Batch>(`/imports/${batchId}/quote-date`, { quote_date: quoteDate })).data

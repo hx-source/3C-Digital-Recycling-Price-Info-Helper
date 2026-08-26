@@ -1,6 +1,7 @@
 from datetime import date
 from pathlib import Path
 import re
+import tempfile
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.entities import BatchStatus, ImportBatch, PriceQuote, PriceStatus, QuoteCandidate, ReviewStatus
+from app.models.entities import BatchStatus, ImportBatch, PriceQuote, PriceStatus, QuoteCandidate, ReviewStatus, SourceType
 from app.schemas.quotes import (
     BatchSummary,
     BatchQuoteDateUpdate,
@@ -21,10 +22,15 @@ from app.schemas.quotes import (
     CandidateSourcePreview,
     CandidateUpdate,
     CommitResult,
+    ExcelPrecheckResult,
+    PurgeAllDataRequest,
     SourceGroupReplaceRequest,
     SourceLineReparseRequest,
 )
-from app.services.import_service import candidate_from_parsed, create_import, reparse_excel, reparse_image
+from app.services.import_service import candidate_from_parsed, create_import, detect_source_type, reparse_excel, reparse_image
+from app.services.excel_importer import ExcelQuoteImporter
+from app.services.excel_precheck import inspect_excel_candidates
+from app.services.excel_source_preview import build_excel_source_context
 from app.services.ocr_provider import OcrConfigurationError, locate_image_cell
 from app.services.parser import parse_text_line
 from app.services.quote_service import commit_batch, update_candidate
@@ -85,7 +91,14 @@ def _looks_like_merged_source_line(raw_text: str) -> bool:
 def _source_group_filters(candidate: QuoteCandidate):
     filters = [QuoteCandidate.batch_id == candidate.batch_id]
     if candidate.cell_address:
-        filters.append(QuoteCandidate.cell_address == candidate.cell_address)
+        # Excel sheets reuse addresses such as B4.  A cell is only a unique
+        # source location when its worksheet is included as well.
+        filters.extend(
+            [
+                QuoteCandidate.cell_address == candidate.cell_address,
+                QuoteCandidate.sheet_name == candidate.sheet_name,
+            ]
+        )
     elif candidate.source_line is not None:
         filters.extend(
             [
@@ -140,10 +153,11 @@ def upload_import(
     quote_date: date | None = Form(None),
     manual_text: str | None = Form(None),
     image_sheet_name: str | None = Form(None),
+    excel_import_mode: Literal["all", "normal_only"] = Form("all"),
     db: Session = Depends(get_db),
 ) -> ImportBatch:
     try:
-        return create_import(db, file, source_name, quote_date, manual_text, image_sheet_name)
+        return create_import(db, file, source_name, quote_date, manual_text, image_sheet_name, excel_import_mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -154,6 +168,7 @@ def upload_imports(
     source_name: str = Form("郑州思物通讯"),
     quote_date: date | None = Form(None),
     manual_text: str | None = Form(None),
+    excel_import_mode: Literal["all", "normal_only"] = Form("all"),
     db: Session = Depends(get_db),
 ) -> list[ImportBatch]:
     if not files:
@@ -164,11 +179,48 @@ def upload_imports(
         raise HTTPException(status_code=400, detail="批量图片请留空人工文本；每张图片会自动识别板块")
     try:
         return [
-            create_import(db, upload, source_name, quote_date, manual_text, None)
+            create_import(db, upload, source_name, quote_date, manual_text, None, excel_import_mode)
             for upload in files
         ]
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/precheck-excel", response_model=ExcelPrecheckResult)
+def precheck_excel_import(
+    file: UploadFile = File(...),
+    quote_date: date | None = Form(None),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Read one workbook without creating a batch so the user can choose an import strategy."""
+    try:
+        source_type = detect_source_type(file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="预检仅支持 XLSX 或 XLSM 表格") from exc
+    if source_type != SourceType.EXCEL:
+        raise HTTPException(status_code=400, detail="预检仅支持 XLSX 或 XLSM 表格")
+
+    suffix = Path(file.filename or "workbook.xlsx").suffix.lower()
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+            total_size = 0
+            while chunk := file.file.read(1024 * 1024):
+                total_size += len(chunk)
+                if total_size > settings.max_upload_mb * 1024 * 1024:
+                    raise HTTPException(status_code=400, detail=f"文件超过 {settings.max_upload_mb} MB 限制")
+                temp_file.write(chunk)
+        parsed = ExcelQuoteImporter().parse(temp_path, quote_date or date.today())
+        existing_quotes = list(db.scalars(select(PriceQuote)).all())
+        return inspect_excel_candidates(parsed, existing_quotes).as_dict()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"表格预检失败：{type(exc).__name__}: {exc}") from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 @router.get("/candidates/{candidate_id}/source", response_model=CandidateSourcePreview)
@@ -178,13 +230,26 @@ def get_candidate_source(candidate_id: int, db: Session = Depends(get_db)) -> Ca
         raise HTTPException(status_code=404, detail="候选记录不存在")
     batch = candidate.batch
     if batch.source_type.value != "image":
+        excel_path = Path(batch.stored_path)
+        if not excel_path.is_file():
+            raise HTTPException(status_code=404, detail="原始表格不存在或已被移动")
+        try:
+            context = build_excel_source_context(excel_path, candidate.sheet_name, candidate.cell_address)
+            message = "蓝框为识别的型号描述；黄框为独立价格单元格。"
+        except ValueError as exc:
+            context = None
+            message = str(exc)
+        except Exception:
+            context = None
+            message = "表格片段暂时无法读取，仍可根据工作表、单元格地址和原文核对。"
         return CandidateSourcePreview(
             source_type=batch.source_type,
             filename=batch.filename,
             sheet_name=candidate.sheet_name,
             cell_address=candidate.cell_address,
             raw_text=candidate.raw_text,
-            message="该记录来自 Excel，可依据工作表和单元格位置回看来源。",
+            excel_context=context,
+            message=message,
         )
 
     image_path = Path(batch.stored_path)
@@ -424,6 +489,43 @@ def get_import(batch_id: int, db: Session = Depends(get_db)) -> ImportBatch:
     if not batch:
         raise HTTPException(status_code=404, detail="导入批次不存在")
     return batch
+
+
+@router.delete("/purge-all")
+def purge_all_import_data(
+    payload: PurgeAllDataRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    """Permanently remove every import, candidate, published quote, and managed source file."""
+    if payload.confirmation.strip() != "清空全部数据":
+        raise HTTPException(status_code=400, detail="请输入“清空全部数据”以确认此操作")
+
+    batches = list(db.scalars(select(ImportBatch)).all())
+    deleted_batches = len(batches)
+    deleted_candidates = db.scalar(select(func.count(QuoteCandidate.id))) or 0
+    deleted_quotes = db.scalar(select(func.count(PriceQuote.id))) or 0
+
+    # Keep the same managed-upload guard as single-batch deletion: data outside
+    # the application's upload directory is never touched.
+    for batch in batches:
+        _remove_managed_source_file(batch)
+
+    try:
+        # PriceQuote references both candidates and batches, so delete it first
+        # instead of relying on database-specific cascading behaviour.
+        db.execute(delete(PriceQuote))
+        db.execute(delete(QuoteCandidate))
+        db.execute(delete(ImportBatch))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "deleted_batches": deleted_batches,
+        "deleted_candidates": deleted_candidates,
+        "deleted_quotes": deleted_quotes,
+    }
 
 
 @router.delete("/{batch_id}")

@@ -3,15 +3,17 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiClient, errorMessage } from '../api'
 import { useMarketStore } from '../stores/market'
-import type { Candidate, CandidateFilterSummary, CandidateSourcePreview, PriceStatus, ReviewStatus } from '../types'
+import type { Batch, Candidate, CandidateFilterSummary, CandidateSourcePreview, PriceStatus, ReviewStatus } from '../types'
 
 type QuickFilter = 'all' | 'pending' | 'low_confidence' | 'incomplete' | 'merged_source' | 'approved' | 'rejected'
 type CandidateSort = 'confidence_asc' | 'confidence_desc' | 'source_asc'
 type SourceGroupItem = Candidate & { isNew?: boolean }
+type BatchScope = 'active' | 'history'
 
 const market = useMarketStore()
 const selectedBatchId = ref<number | null>(null)
 const batchQuoteDate = ref('')
+const batchScope = ref<BatchScope>('active')
 const candidates = ref<Candidate[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -25,8 +27,11 @@ const sourceGroupReparsing = ref(false)
 const sourceGroup = ref<SourceGroupItem[]>([])
 const sourceGroupAnchorId = ref<number | null>(null)
 const sourceGroupRawText = ref('')
+const sourceGroupType = ref<'excel' | 'image' | null>(null)
+let sourceGroupRequestVersion = 0
 const editorSourceLoading = ref(false)
 const editorSourcePreview = ref<CandidateSourcePreview | null>(null)
+let editorSourceRequestVersion = 0
 const sourceDialogOpen = ref(false)
 const sourceLoading = ref(false)
 const sourcePreview = ref<CandidateSourcePreview | null>(null)
@@ -39,6 +44,16 @@ const appliedKeyword = ref('')
 const summary = ref<CandidateFilterSummary>({ all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, rejected: 0, merged_source_groups: 0 })
 
 const selectedBatch = computed(() => market.batches.find(item => item.id === selectedBatchId.value) || null)
+const activeBatches = computed(() => market.batches.filter(item => item.status !== 'committed'))
+const visibleBatches = computed(() => batchScope.value === 'history' ? market.batches : activeBatches.value)
+const batchGroups = computed(() => {
+  const groups = new Map<string, Batch[]>()
+  for (const batch of visibleBatches.value) {
+    const key = uploadDateLabel(batch.created_at)
+    groups.set(key, [...(groups.get(key) || []), batch])
+  }
+  return [...groups.entries()].map(([label, batches]) => ({ label, batches }))
+})
 const pendingOnPage = computed(() => candidates.value.filter(item => item.review_status === 'pending').length)
 const quickFilters = computed(() => [
   { key: 'all' as const, label: '全部', count: summary.value.all },
@@ -52,8 +67,66 @@ const quickFilters = computed(() => [
 
 const boardOptions = ['VIVO', 'OPPO', '红米小米', '华为系列', '华为融合系列', '荣耀报价', '电玩 大疆 鼠标', '图片自动识别']
 
+function uploadDateLabel(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '上传日期未知'
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日上传`
+}
+
+function uploadTimeLabel(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '时间未知'
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function batchOptionLabel(batch: Batch) {
+  const kind = batch.source_type === 'image' ? '图片' : '表格'
+  const state = batch.status === 'committed' ? '已发布' : batch.status === 'review' ? '待复核' : '处理中'
+  return `${uploadTimeLabel(batch.created_at)} · ${kind} · ${batch.total_candidates} 条 · ${state}`
+}
+
+function toggleBatchScope() {
+  batchScope.value = batchScope.value === 'active' ? 'history' : 'active'
+  if (batchScope.value === 'active' && selectedBatch.value?.status === 'committed') {
+    selectedBatchId.value = activeBatches.value[0]?.id || null
+  }
+}
+
 function statusLabel(status: string) {
   return { pending: '待复核', approved: '已通过', rejected: '已拒绝' }[status] || status
+}
+
+function sourceActionLabel(row: Candidate) {
+  return market.batches.find(item => item.id === row.batch_id)?.source_type === 'excel' ? '查看表格' : '查看原图'
+}
+
+function isExcelCandidate(row: Candidate) {
+  return market.batches.find(item => item.id === row.batch_id)?.source_type === 'excel'
+}
+
+function sourceGroupActionLabel(row: Candidate) {
+  return isExcelCandidate(row) ? '编辑单元格' : '整行'
+}
+
+function sourceGroupTitle() {
+  const unit = sourceGroupType.value === 'excel' ? '编辑单元格' : '整行复核'
+  return `${unit} · ${sourceGroup.value.length} 条报价`
+}
+
+function sourceGroupOriginLabel() {
+  return sourceGroupType.value === 'excel' ? '同一表格单元格' : '同一图片识别区域'
+}
+
+function sourceGroupRawLabel() {
+  return sourceGroupType.value === 'excel' ? '修正该单元格原文' : '修正这一行原文'
+}
+
+function sourceDialogTitle() {
+  return sourcePreview.value?.source_type === 'excel' ? '表格来源定位' : '来源原图定位'
+}
+
+function excelCellClasses(cell: { is_source: boolean; is_price: boolean }) {
+  return { 'excel-source-cell': cell.is_source, 'excel-price-cell': cell.is_price }
 }
 
 function priceStatusLabel(status: string) {
@@ -108,14 +181,17 @@ function resetFilters() {
 }
 
 async function loadEditorSource(row: Candidate) {
+  const requestVersion = ++editorSourceRequestVersion
   editorSourcePreview.value = null
   editorSourceLoading.value = true
   try {
-    editorSourcePreview.value = await apiClient.candidateSource(row.id)
+    const preview = await apiClient.candidateSource(row.id)
+    if (requestVersion !== editorSourceRequestVersion) return
+    editorSourcePreview.value = preview
   } catch (error) {
-    ElMessage.error(errorMessage(error))
+    if (requestVersion === editorSourceRequestVersion) ElMessage.error(errorMessage(error))
   } finally {
-    editorSourceLoading.value = false
+    if (requestVersion === editorSourceRequestVersion) editorSourceLoading.value = false
   }
 }
 
@@ -127,19 +203,24 @@ async function edit(row: Candidate) {
 }
 
 async function editSourceGroup(row: Candidate) {
+  const requestVersion = ++sourceGroupRequestVersion
   sourceGroupDialogOpen.value = true
   sourceGroupLoading.value = true
   sourceGroup.value = []
   sourceGroupAnchorId.value = row.id
   sourceGroupRawText.value = row.raw_text
+  sourceGroupType.value = isExcelCandidate(row) ? 'excel' : 'image'
   void loadEditorSource(row)
   try {
-    sourceGroup.value = await apiClient.candidateSourceGroup(row.id)
+    const items = await apiClient.candidateSourceGroup(row.id)
+    if (requestVersion !== sourceGroupRequestVersion) return
+    sourceGroup.value = items
   } catch (error) {
+    if (requestVersion !== sourceGroupRequestVersion) return
     ElMessage.error(errorMessage(error))
     sourceGroupDialogOpen.value = false
   } finally {
-    sourceGroupLoading.value = false
+    if (requestVersion === sourceGroupRequestVersion) sourceGroupLoading.value = false
   }
 }
 
@@ -384,6 +465,35 @@ async function deleteSelectedBatch() {
   }
 }
 
+async function purgeAllData() {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '这会永久删除所有导入图片和表格、全部复核记录及所有已发布报价历史，无法恢复。请输入“清空全部数据”继续。',
+      '清空全部数据',
+      {
+        confirmButtonText: '永久清空',
+        cancelButtonText: '取消',
+        inputPlaceholder: '清空全部数据',
+        inputPattern: /^清空全部数据$/,
+        inputErrorMessage: '请输入“清空全部数据”',
+        confirmButtonClass: 'purge-confirm-button',
+        customClass: 'purge-all-dialog',
+      },
+    )
+    const result = await apiClient.purgeAllData(value)
+    selectedBatchId.value = null
+    candidates.value = []
+    total.value = 0
+    summary.value = { all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, rejected: 0, merged_source_groups: 0 }
+    batchScope.value = 'active'
+    resetFilters()
+    await market.refresh()
+    ElMessage.success(`已清空 ${result.deleted_batches} 个导入批次、${result.deleted_candidates} 条复核记录和 ${result.deleted_quotes} 条报价历史`)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
 async function reopenSelectedBatch() {
   const batch = selectedBatch.value
   if (!batch || batch.status !== 'committed') return
@@ -446,17 +556,22 @@ onMounted(async () => {
         <button class="ghost-action approve" :disabled="!selectedBatch" @click="reviewAll('approved')">全部通过</button>
         <button v-if="selectedBatch?.status === 'committed'" class="ghost-action reopen-batch-action" @click="reopenSelectedBatch">撤回到复核</button>
         <button class="ghost-action delete-batch-action" :disabled="!selectedBatch || selectedBatch.status === 'committed'" @click="deleteSelectedBatch">{{ selectedBatch?.source_type === 'image' ? '删除图片批次' : '删除导入批次' }}</button>
+        <button class="ghost-action purge-all-action" @click="purgeAllData">清空全部数据</button>
         <button class="primary-action compact" :disabled="!selectedBatch || selectedBatch.status === 'committed'" @click="commit">发布报价</button>
       </div>
     </div>
 
     <div class="review-toolbar">
-      <label><span>导入批次</span>
-        <select v-model="selectedBatchId">
-          <option v-for="batch in market.batches" :key="batch.id" :value="batch.id">
-            {{ batch.filename }} · {{ batch.total_candidates }} 条
-          </option>
-        </select>
+      <label class="batch-picker"><span>{{ batchScope === 'active' ? '待处理批次' : '历史批次' }}</span>
+        <div>
+          <select v-model="selectedBatchId">
+            <option v-if="!batchGroups.length" :value="null" disabled>暂无待处理批次</option>
+            <optgroup v-for="group in batchGroups" :key="group.label" :label="group.label">
+              <option v-for="batch in group.batches" :key="batch.id" :value="batch.id">{{ batchOptionLabel(batch) }}</option>
+            </optgroup>
+          </select>
+          <button type="button" @click="toggleBatchScope">{{ batchScope === 'active' ? '查看历史' : '只看待处理' }}</button>
+        </div>
       </label>
       <label class="batch-date-editor"><span>报价日期</span><div><input v-model="batchQuoteDate" type="date" :disabled="!selectedBatch" /><button type="button" :disabled="!selectedBatch || !batchQuoteDate" @click="saveBatchQuoteDate">保存</button></div></label>
       <div class="review-stat"><span>筛选结果</span><b>{{ total }}</b></div>
@@ -493,14 +608,14 @@ onMounted(async () => {
         <thead><tr><th>来源</th><th>品牌 / 型号</th><th>规格</th><th>颜色 / 版本</th><th>价格</th><th>置信度</th><th>状态</th><th></th></tr></thead>
         <tbody>
           <tr v-for="row in candidates" :key="row.id" :class="{ uncertain: row.confidence < 0.75 }">
-            <td><button class="source-link" type="button" @click.stop="viewSource(row)"><small>{{ row.sheet_name || '图片' }}</small><br><code>{{ row.cell_address || `L${row.id}` }}</code><b>查看原图</b></button></td>
+            <td><button class="source-link" type="button" @click.stop="viewSource(row)"><small>{{ row.sheet_name || '图片' }}</small><br><code>{{ row.cell_address || `L${row.id}` }}</code><b>{{ sourceActionLabel(row) }}</b></button></td>
             <td><b>{{ row.brand }}</b><br><span>{{ row.model }}</span></td>
             <td>{{ row.storage || '—' }}</td>
             <td>{{ [row.color, row.variant].filter(Boolean).join(' · ') || '—' }}</td>
             <td><strong v-if="row.price_status === 'quoted'">¥{{ row.price }}</strong><span v-else class="price-state">{{ priceStatusLabel(row.price_status) }}</span></td>
             <td><span class="confidence"><i :style="{ width: `${row.confidence * 100}%` }"></i></span><small>{{ Math.round(row.confidence * 100) }}%</small></td>
             <td><span :class="['review-badge', row.review_status]">{{ statusLabel(row.review_status) }}</span></td>
-            <td class="row-actions"><button @click="reviewOne(row, 'approved')">✓</button><button @click="reviewOne(row, 'rejected')">×</button><button @click="viewSource(row)">原图</button><button class="source-row-edit" @click="editSourceGroup(row)">整行</button><button @click="edit(row)">单条</button><button class="delete-action" @click="deleteCandidate(row)">删除</button></td>
+            <td class="row-actions"><button @click="reviewOne(row, 'approved')">✓</button><button @click="reviewOne(row, 'rejected')">×</button><button @click="viewSource(row)">{{ sourceActionLabel(row) }}</button><button class="source-row-edit" @click="editSourceGroup(row)">{{ sourceGroupActionLabel(row) }}</button><button @click="edit(row)">单条</button><button class="delete-action" @click="deleteCandidate(row)">删除</button></td>
           </tr>
           <tr v-if="!candidates.length"><td colspan="8" class="empty-cell">当前筛选没有记录，调整条件后再试。</td></tr>
         </tbody>
@@ -531,11 +646,11 @@ onMounted(async () => {
       <template #footer><button class="ghost-action" @click="dialogOpen = false">取消</button><button class="primary-action compact" @click="saveEdit">保存并返回</button></template>
     </el-dialog>
 
-    <el-dialog v-model="sourceGroupDialogOpen" :title="`整行复核 · ${sourceGroup.length} 条拆分报价`" width="min(1080px, 94vw)">
+    <el-dialog v-model="sourceGroupDialogOpen" :title="sourceGroupTitle()" width="min(1080px, 94vw)">
       <div v-loading="sourceGroupLoading" class="source-line-editor">
         <template v-if="sourceGroup.length">
           <div class="source-line-intro">
-            <div><span>同一来源行</span><strong>逐条修改，不会把不同型号或颜色合并成一个报价。</strong></div>
+            <div><span>{{ sourceGroupOriginLabel() }}</span><strong>逐条修改，不会把不同型号或颜色合并成一个报价。</strong></div>
             <div class="source-line-head-actions"><small>{{ sourceGroup[0].sheet_name || '图片' }} · {{ sourceGroup[0].cell_address || `第 ${sourceGroup[0].source_line || '—'} 行` }}</small><button type="button" class="add-source-item" :disabled="sourceGroupReparsing || sourceGroupSaving" @click="addSourceGroupItem">＋ 添加报价</button></div>
           </div>
           <div v-if="editorSourceLoading || editorSourcePreview" v-loading="editorSourceLoading" class="editor-source-context source-group-context">
@@ -546,7 +661,7 @@ onMounted(async () => {
               <p>识别片段：{{ editorSourcePreview.raw_text }}</p>
             </template>
           </div>
-          <label class="source-line-text"><span>修正这一行原文</span><textarea v-model="sourceGroupRawText" rows="2" :disabled="sourceGroupReparsing" /></label>
+          <label class="source-line-text"><span>{{ sourceGroupRawLabel() }}</span><textarea v-model="sourceGroupRawText" rows="2" :disabled="sourceGroupReparsing" /></label>
           <p class="source-line-help">缺少颜色或价格时，直接补到原文中，再点击“按原文重新拆分”。系统会替换旧记录，不会追加重复数据。</p>
           <div class="source-line-list">
             <section v-for="(item, index) in sourceGroup" :key="item.id" class="source-line-item">
@@ -566,10 +681,10 @@ onMounted(async () => {
           </div>
         </template>
       </div>
-      <template #footer><button class="ghost-action" @click="sourceGroupDialogOpen = false">取消</button><button class="ghost-action delete-action source-group-delete" :disabled="sourceGroupLoading || sourceGroupReparsing || sourceGroupSaving || !sourceGroup.length" @click="deleteSourceGroup">删除这一行</button><button class="ghost-action source-reparse-action" :disabled="sourceGroupLoading || sourceGroupReparsing || sourceGroupSaving || !sourceGroup.length" @click="reparseSourceGroup">按原文重新拆分</button><button class="primary-action compact" :disabled="sourceGroupLoading || sourceGroupReparsing || sourceGroupSaving || !sourceGroup.length" @click="saveSourceGroup">{{ sourceGroupSaving ? '正在保存…' : '保存这一行的报价' }}</button></template>
+      <template #footer><button class="ghost-action" @click="sourceGroupDialogOpen = false">取消</button><button class="ghost-action delete-action source-group-delete" :disabled="sourceGroupLoading || sourceGroupReparsing || sourceGroupSaving || !sourceGroup.length" @click="deleteSourceGroup">删除{{ sourceGroupType === 'excel' ? '该单元格' : '这一行' }}</button><button class="ghost-action source-reparse-action" :disabled="sourceGroupLoading || sourceGroupReparsing || sourceGroupSaving || !sourceGroup.length" @click="reparseSourceGroup">按原文重新拆分</button><button class="primary-action compact" :disabled="sourceGroupLoading || sourceGroupReparsing || sourceGroupSaving || !sourceGroup.length" @click="saveSourceGroup">{{ sourceGroupSaving ? '正在保存…' : `保存${sourceGroupType === 'excel' ? '单元格' : '这一行'}报价` }}</button></template>
     </el-dialog>
 
-    <el-dialog v-model="sourceDialogOpen" title="来源原图定位" width="min(960px, 94vw)" class="source-preview-dialog">
+    <el-dialog v-model="sourceDialogOpen" :title="sourceDialogTitle()" width="min(960px, 94vw)" class="source-preview-dialog">
       <div v-loading="sourceLoading" class="source-preview-body">
         <template v-if="sourcePreview">
           <div class="source-preview-meta">
@@ -585,6 +700,27 @@ onMounted(async () => {
               </div>
             </div>
             <p v-if="sourcePreview.region" class="source-preview-tip">{{ sourcePreview.region.precise ? '已按表格行列精确定位。' : '图片缺少完整表格线，已按 OCR 文本区域近似定位。' }}</p>
+          </template>
+          <template v-if="sourcePreview.excel_context">
+            <div class="excel-source-meta">
+              <span>工作表 <b>{{ sourcePreview.excel_context.sheet_name }}</b></span>
+              <span>型号来源 <b>{{ sourcePreview.excel_context.source_cell }}</b></span>
+              <span v-if="sourcePreview.excel_context.price_cell">独立价格 <b>{{ sourcePreview.excel_context.price_cell }}</b></span>
+            </div>
+            <div class="excel-source-grid-wrap">
+              <table class="excel-source-grid">
+                <thead><tr><th></th><th v-for="column in sourcePreview.excel_context.columns" :key="column">{{ column }}</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in sourcePreview.excel_context.rows" :key="row.row">
+                    <th>{{ row.row }}</th>
+                    <td v-for="cell in row.cells" :key="cell.coordinate" :class="excelCellClasses(cell)">
+                      <small>{{ cell.coordinate }}</small><span>{{ cell.value || '—' }}</span><em v-if="cell.merged_range">{{ cell.merged_range }}</em>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="excel-source-tip"><i></i> 蓝框：型号/颜色等识别原文　 <b></b> 黄框：独立价格单元格</p>
           </template>
           <p v-if="sourcePreview.message" class="source-preview-message">{{ sourcePreview.message }}</p>
         </template>

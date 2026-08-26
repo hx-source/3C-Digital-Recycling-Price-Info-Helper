@@ -56,6 +56,27 @@ export interface ImageSourceRegion {
   precise: boolean
 }
 
+export interface ExcelSourceCell {
+  coordinate: string
+  value: string | null
+  merged_range: string | null
+  is_source: boolean
+  is_price: boolean
+}
+
+export interface ExcelSourceRow {
+  row: number
+  cells: ExcelSourceCell[]
+}
+
+export interface ExcelSourceContext {
+  sheet_name: string
+  source_cell: string
+  price_cell: string | null
+  columns: string[]
+  rows: ExcelSourceRow[]
+}
+
 export interface CandidateSourcePreview {
   source_type: 'excel' | 'image'
   filename: string
@@ -64,6 +85,7 @@ export interface CandidateSourcePreview {
   raw_text: string
   image_url: string | null
   region: ImageSourceRegion | null
+  excel_context: ExcelSourceContext | null
   message: string | null
 }
 
@@ -75,6 +97,35 @@ export interface CandidateFilterSummary {
   approved: number
   rejected: number
   merged_source_groups: number
+}
+
+export interface ExcelPrecheckIssue {
+  reasons: string[]
+  sheet_name: string | null
+  cell_address: string | null
+  brand: string
+  model: string
+  storage: string | null
+  color: string | null
+  price_status: PriceStatus
+  price: number | null
+  previous_price: number | null
+  difference: number | null
+  raw_text: string
+  duplicate_detail: string | null
+}
+
+export interface ExcelPrecheckResult {
+  total_candidates: number
+  normal_candidates: number
+  needs_review_candidates: number
+  incomplete_candidates: number
+  no_quote_candidates: number
+  masked_candidates: number
+  duplicate_candidates: number
+  abnormal_price_candidates: number
+  issues: ExcelPrecheckIssue[]
+  records: ExcelPrecheckIssue[]
 }
 
 export interface Quote {

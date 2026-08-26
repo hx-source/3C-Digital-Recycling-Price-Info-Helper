@@ -12,14 +12,38 @@ defineEmits<{ navigate: [view: 'import' | 'review' | 'quotes'] }>()
 
 const market = useMarketStore()
 const chartEl = ref<HTMLDivElement | null>(null)
+const activeBrand = ref('all')
 let chart: ECharts | null = null
 
-const tape = computed(() => market.changes.filter(item => item.change_amount !== null).slice(0, 12))
+const currentChanges = computed(() => market.changes.filter(item => (
+  item.change_amount !== null
+  && !item.requires_review
+  && item.current_date === market.dashboard?.latest_quote_date
+)))
+const brandOptions = computed(() => [...new Set(currentChanges.value.map(item => item.brand))].sort())
+const brandChanges = computed(() => activeBrand.value === 'all'
+  ? currentChanges.value
+  : currentChanges.value.filter(item => item.brand === activeBrand.value))
+const chartRows = computed(() => {
+  const decreases = brandChanges.value
+    .filter(item => (item.change_amount || 0) < 0)
+    .sort((a, b) => Number(a.change_amount) - Number(b.change_amount))
+    .slice(0, 5)
+    .reverse()
+  const increases = brandChanges.value
+    .filter(item => (item.change_amount || 0) > 0)
+    .sort((a, b) => Number(b.change_amount) - Number(a.change_amount))
+    .slice(0, 5)
+  return [...decreases, ...increases]
+})
+const tape = computed(() => [...brandChanges.value]
+  .sort((a, b) => Math.abs(Number(b.change_amount)) - Math.abs(Number(a.change_amount)))
+  .slice(0, 12))
 
 function renderChart() {
   if (!chartEl.value || !market.dashboard) return
   chart ||= init(chartEl.value)
-  const rows = [...market.dashboard.top_decreases.slice(0, 5).reverse(), ...market.dashboard.top_increases.slice(0, 5)]
+  const rows = chartRows.value
   chart.setOption({
     grid: { left: 120, right: 30, top: 18, bottom: 24 },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
@@ -47,7 +71,7 @@ function renderChart() {
   })
 }
 
-watch(() => market.dashboard, () => nextTick(renderChart), { deep: true })
+watch([() => market.dashboard, () => market.changes, activeBrand], () => nextTick(renderChart), { deep: true })
 onMounted(() => {
   nextTick(renderChart)
   window.addEventListener('resize', () => chart?.resize())
@@ -70,7 +94,7 @@ onMounted(() => {
 
     <div class="dashboard-grid">
       <article class="chart-card">
-        <div class="card-title"><span>PRICE DELTA</span><h3>本期涨跌额分布</h3></div>
+        <div class="chart-heading"><div class="card-title"><span>PRICE DELTA</span><h3>{{ activeBrand === 'all' ? '全品牌涨跌额分布' : `${activeBrand} 涨跌额分布` }}</h3></div><div class="brand-switch" aria-label="按品牌查看"><button :class="{ active: activeBrand === 'all' }" @click="activeBrand = 'all'">全部</button><button v-for="brand in brandOptions" :key="brand" :class="{ active: activeBrand === brand }" @click="activeBrand = brand">{{ brand }}</button></div></div>
         <div ref="chartEl" class="delta-chart"></div>
       </article>
       <article class="action-card">
@@ -82,7 +106,7 @@ onMounted(() => {
     </div>
 
     <div class="ticker-board">
-      <div class="ticker-label"><span>LIVE</span><strong>价格脉冲</strong></div>
+      <div class="ticker-label"><span>{{ activeBrand === 'all' ? 'ALL BRANDS' : activeBrand }}</span><strong>价格脉冲</strong></div>
       <div class="ticker-flow" v-if="tape.length">
         <span v-for="item in tape" :key="item.model_key">
           {{ item.model }} {{ item.color || '' }}

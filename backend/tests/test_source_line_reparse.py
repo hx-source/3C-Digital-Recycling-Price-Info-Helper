@@ -7,6 +7,7 @@ from app.api.routes.imports import (
     delete_candidate,
     delete_candidate_source_group,
     delete_import,
+    get_candidate_source_group,
     reopen_import_for_review,
     replace_candidate_source_group,
     reparse_candidate_source_line,
@@ -22,6 +23,39 @@ from app.schemas.quotes import (
 )
 from app.services.import_service import candidate_from_parsed
 from app.services.parser import parse_text_line
+
+
+def test_excel_source_group_keeps_same_cell_addresses_on_different_sheets_separate() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    quote_date = date(2026, 8, 24)
+
+    with Session(engine) as db:
+        batch = ImportBatch(
+            source_type=SourceType.EXCEL,
+            source_name="测试来源",
+            filename="source.xlsx",
+            stored_path="source.xlsx",
+            file_sha256="d" * 64,
+            status=BatchStatus.REVIEW,
+            quote_date=quote_date,
+        )
+        db.add(batch)
+        db.flush()
+        oppo = candidate_from_parsed(
+            batch.id,
+            parse_text_line("OPPOK12s 8+128 黑1260", sheet_name="OPPO", quote_date=quote_date, cell_address="B4")[0],
+        )
+        vivo = candidate_from_parsed(
+            batch.id,
+            parse_text_line("X200s 12+256 黑3460", sheet_name="VIVO", quote_date=quote_date, cell_address="B4")[0],
+        )
+        db.add_all([oppo, vivo])
+        db.commit()
+
+        result = get_candidate_source_group(oppo.id, db)
+
+        assert [candidate.id for candidate in result] == [oppo.id]
 
 
 def test_corrected_source_line_replaces_records_instead_of_appending() -> None:

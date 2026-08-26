@@ -14,12 +14,14 @@ from app.core.config import settings
 from app.models.entities import (
     BatchStatus,
     ImportBatch,
+    PriceQuote,
     PriceStatus,
     QuoteCandidate,
     ReviewStatus,
     SourceType,
 )
 from app.services.excel_importer import ExcelQuoteImporter
+from app.services.excel_precheck import inspect_excel_candidates
 from app.services.ocr_provider import ManualTextOcrProvider, OcrConfigurationError, RapidOcrTableProvider
 from app.services.parser import PARSER_VERSION, ParsedCandidate
 
@@ -101,7 +103,10 @@ def create_import(
     requested_date: date | None,
     manual_text: str | None,
     image_sheet_name: str | None,
+    excel_import_mode: str = "all",
 ) -> ImportBatch:
+    if excel_import_mode not in {"all", "normal_only"}:
+        raise ValueError("Excel 导入方式不正确")
     source_type = detect_source_type(upload.filename or "")
     path, sha256 = save_upload(upload)
     batch = ImportBatch(
@@ -120,6 +125,9 @@ def create_import(
     try:
         if source_type == SourceType.EXCEL:
             items = ExcelQuoteImporter().parse(path, fallback_date)
+            if excel_import_mode == "normal_only":
+                existing_quotes = list(db.scalars(select(PriceQuote)).all())
+                items = inspect_excel_candidates(items, existing_quotes).normal_items
         else:
             provider = ManualTextOcrProvider(manual_text) if manual_text else RapidOcrTableProvider()
             items = provider.recognize(path, fallback_date, image_sheet_name)

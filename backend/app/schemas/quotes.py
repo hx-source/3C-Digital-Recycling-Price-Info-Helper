@@ -56,6 +56,27 @@ class ImageSourceRegionRead(BaseModel):
     precise: bool
 
 
+class ExcelSourceCellRead(BaseModel):
+    coordinate: str
+    value: str | None
+    merged_range: str | None = None
+    is_source: bool = False
+    is_price: bool = False
+
+
+class ExcelSourceRowRead(BaseModel):
+    row: int
+    cells: list[ExcelSourceCellRead]
+
+
+class ExcelSourceContextRead(BaseModel):
+    sheet_name: str
+    source_cell: str
+    price_cell: str | None = None
+    columns: list[str]
+    rows: list[ExcelSourceRowRead]
+
+
 class CandidateSourcePreview(BaseModel):
     source_type: SourceType
     filename: str
@@ -64,6 +85,7 @@ class CandidateSourcePreview(BaseModel):
     raw_text: str
     image_url: str | None = None
     region: ImageSourceRegionRead | None = None
+    excel_context: ExcelSourceContextRead | None = None
     message: str | None = None
 
 
@@ -113,6 +135,41 @@ class SourceGroupReplaceRequest(BaseModel):
 
 class BatchQuoteDateUpdate(BaseModel):
     quote_date: date
+
+
+class ExcelPrecheckIssue(BaseModel):
+    reasons: list[str]
+    sheet_name: str | None = None
+    cell_address: str | None = None
+    brand: str
+    model: str
+    storage: str | None = None
+    color: str | None = None
+    price_status: PriceStatus
+    price: Decimal | None = None
+    previous_price: Decimal | None = None
+    difference: Decimal | None = None
+    raw_text: str
+    duplicate_detail: str | None = None
+
+
+class ExcelPrecheckResult(BaseModel):
+    total_candidates: int
+    normal_candidates: int
+    needs_review_candidates: int
+    incomplete_candidates: int
+    no_quote_candidates: int
+    masked_candidates: int
+    duplicate_candidates: int
+    abnormal_price_candidates: int
+    issues: list[ExcelPrecheckIssue]
+    records: list[ExcelPrecheckIssue]
+
+
+class PurgeAllDataRequest(BaseModel):
+    """Explicit confirmation required before destructive workspace-wide cleanup."""
+
+    confirmation: str = Field(min_length=1, max_length=40)
 
 
 class BulkReviewRequest(BaseModel):

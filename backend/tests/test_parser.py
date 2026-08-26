@@ -77,3 +77,17 @@ def test_splits_colors_when_price_is_missing() -> None:
     assert {item.model for item in items} == {"Ace5"}
     assert {item.color for item in items} == {"黑", "钛"}
     assert all(item.price_status == PriceStatus.MASKED for item in items)
+
+
+def test_restores_oneplus_brand_when_ocr_drops_yi_prefix() -> None:
+    items = parse_text_line(
+        "加Ace5 12+256 黑2850白2840",
+        sheet_name="OPPO",
+        quote_date=QUOTE_DATE,
+    )
+    assert {item.brand for item in items} == {"OnePlus"}
+    assert {item.model for item in items} == {"Ace5"}
+    assert [(item.color, item.price) for item in items] == [
+        ("黑", Decimal("2850")),
+        ("白", Decimal("2840")),
+    ]
