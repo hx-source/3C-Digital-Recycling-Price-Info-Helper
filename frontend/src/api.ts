@@ -1,11 +1,17 @@
 import axios from 'axios'
-import type { Batch, Candidate, CandidatePage, CandidateSourcePreview, DashboardSummary, ExcelPrecheckResult, PriceChange, PriceStatus, Quote, ReviewStatus } from './types'
+import type { AgentChatResponse, AgentMessageInput, Batch, Candidate, CandidatePage, CandidateSourcePreview, DashboardSummary, ExcelPrecheckResult, ImportAgentSummaryRequest, ImportAgentSummaryResponse, PriceChange, PriceStatus, Quote, ReviewStatus } from './types'
 
 const api = axios.create({ baseURL: '/api/v1', timeout: 120_000 })
 
 export const apiClient = {
   async dashboard() {
     return (await api.get<DashboardSummary>('/dashboard/summary')).data
+  },
+  async askAgent(question: string, history: AgentMessageInput[]) {
+    return (await api.post<AgentChatResponse>('/agent/chat', { question, history })).data
+  },
+  async summarizeImport(payload: ImportAgentSummaryRequest) {
+    return (await api.post<ImportAgentSummaryResponse>('/agent/import-summary', payload)).data
   },
   async batches() {
     return (await api.get<Batch[]>('/imports')).data

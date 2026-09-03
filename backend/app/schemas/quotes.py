@@ -238,3 +238,45 @@ class DashboardSummary(BaseModel):
     today_unchanged: int
     top_increases: list[PriceChangeRead]
     top_decreases: list[PriceChangeRead]
+
+
+class AgentMessage(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class AgentChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    history: list[AgentMessage] = Field(default_factory=list, max_length=12)
+
+
+class AgentSource(BaseModel):
+    label: str
+    detail: str
+
+
+class AgentChatResponse(BaseModel):
+    answer: str
+    sources: list[AgentSource] = Field(default_factory=list)
+    tools_used: list[str] = Field(default_factory=list)
+    model: str
+
+
+class ImportAgentSummaryRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    source_type: str = Field(pattern="^(excel|image|mixed)$")
+    total_candidates: int = Field(ge=0)
+    normal_candidates: int = Field(default=0, ge=0)
+    needs_review_candidates: int = Field(default=0, ge=0)
+    duplicate_candidates: int = Field(default=0, ge=0)
+    abnormal_price_candidates: int = Field(default=0, ge=0)
+    incomplete_candidates: int = Field(default=0, ge=0)
+    no_quote_candidates: int = Field(default=0, ge=0)
+    masked_candidates: int = Field(default=0, ge=0)
+
+
+class ImportAgentSummaryResponse(BaseModel):
+    summary: str
+    recommendations: list[str] = Field(default_factory=list)
+    generated_by_model: bool
+    model: str

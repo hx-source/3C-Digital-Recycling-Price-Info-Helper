@@ -3,7 +3,7 @@ import { computed, nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { apiClient, errorMessage } from '../api'
 import { useMarketStore } from '../stores/market'
-import type { ExcelPrecheckIssue, ExcelPrecheckResult } from '../types'
+import type { ExcelPrecheckIssue, ExcelPrecheckResult, ImportAgentSummaryRequest, ImportAgentSummaryResponse } from '../types'
 
 const emit = defineEmits<{ navigate: [view: 'review'] }>()
 const market = useMarketStore()
@@ -28,8 +28,11 @@ const uploading = ref(false)
 const prechecking = ref(false)
 const dragActive = ref(false)
 const excelPrecheck = ref<ExcelPrecheckResult | null>(null)
-const inspection = ref<PrecheckInspection>('focus')
+const importAgentSummary = ref<ImportAgentSummaryResponse | null>(null)
+const summarizing = ref(false)
+const inspection = ref<PrecheckInspection>('normal')
 const inspectionPanel = ref<HTMLElement | null>(null)
+let summaryRequestId = 0
 
 const imageFiles = computed(() => queue.value.filter(item => item.file.type.startsWith('image/')))
 const hasImages = computed(() => imageFiles.value.length > 0)
@@ -51,6 +54,34 @@ const progressPercent = computed(() => {
 })
 const hasWorkToProcess = computed(() => queue.value.some(item => item.status === 'waiting' || item.status === 'failed'))
 const isComplete = computed(() => queue.value.length > 0 && processedCount.value === queue.value.length)
+const sourceType = computed<'excel' | 'image' | 'mixed'>(() => {
+  const excelCount = queue.value.filter(item => /\.(xlsx|xlsm)$/i.test(item.file.name)).length
+  if (excelCount === queue.value.length) return 'excel'
+  if (!excelCount) return 'image'
+  return 'mixed'
+})
+const agentPhase = computed(() => {
+  if (isComplete.value) return 3
+  if (uploading.value || prechecking.value || summarizing.value || excelPrecheck.value) return 2
+  if (queue.value.length) return 1
+  return 0
+})
+const agentHeadline = computed(() => {
+  if (uploading.value) return `正在处理第 ${Math.min(processedCount.value + 1, queue.value.length)} 个文件`
+  if (prechecking.value) return '正在执行 Excel 入库预检'
+  if (summarizing.value) return '正在分析预检结果并整理建议'
+  if (importAgentSummary.value) return '本次导入建议已经生成'
+  if (queue.value.length) return `已识别为${sourceType.value === 'excel' ? '表格来源' : sourceType.value === 'image' ? '图片来源' : '混合来源'}`
+  return '把报价来源交给我'
+})
+const agentNarrative = computed(() => {
+  if (importAgentSummary.value) return importAgentSummary.value.summary
+  if (uploading.value) return '我正在调用对应解析流程，并逐个建立可复核批次。'
+  if (prechecking.value) return '我会先检查重复、缺价、通配价格与异常涨跌，不会直接写入报价历史。'
+  if (summarizing.value) return '本地模型只负责解释检查结果，统计数字仍来自程序规则。'
+  if (queue.value.length) return `已接收 ${queue.value.length} 个文件。确认来源和日期后即可开始处理。`
+  return '上传 Excel 或图片后，我会判断来源、执行解析与预检，再告诉你应优先检查什么。'
+})
 const inspectionRecords = computed<ExcelPrecheckIssue[]>(() => {
   const records = excelPrecheck.value?.records || []
   if (inspection.value === 'normal') return records.filter(record => !record.reasons.length)
@@ -74,7 +105,8 @@ function appendFiles(nextFiles: File[]) {
   if (merged.length > 30) ElMessage.warning('一次最多导入 30 个文件，已保留前 30 个')
   queue.value = merged.slice(0, 30)
   excelPrecheck.value = null
-  inspection.value = 'focus'
+  resetAgentSummary()
+  inspection.value = 'normal'
   if (!canUseManualText.value) manualText.value = ''
 }
 
@@ -93,8 +125,28 @@ function removeFile(index: number) {
   if (uploading.value || prechecking.value) return
   queue.value.splice(index, 1)
   excelPrecheck.value = null
-  inspection.value = 'focus'
+  resetAgentSummary()
+  inspection.value = 'normal'
   if (!canUseManualText.value) manualText.value = ''
+}
+
+function resetAgentSummary() {
+  summaryRequestId += 1
+  summarizing.value = false
+  importAgentSummary.value = null
+}
+
+async function requestImportSummary(payload: ImportAgentSummaryRequest, guard?: ExcelPrecheckResult) {
+  const requestId = ++summaryRequestId
+  summarizing.value = true
+  try {
+    const result = await apiClient.summarizeImport(payload)
+    if (requestId === summaryRequestId && (!guard || excelPrecheck.value === guard)) importAgentSummary.value = result
+  } catch {
+    // 智能总结是辅助能力，不影响原有导入与复核流程。
+  } finally {
+    if (requestId === summaryRequestId) summarizing.value = false
+  }
 }
 
 function animateToComplete(item: QueueItem) {
@@ -117,9 +169,22 @@ async function requestExcelPrecheck() {
     const form = new FormData()
     form.append('file', item.file)
     if (quoteDate.value) form.append('quote_date', quoteDate.value)
-    excelPrecheck.value = await apiClient.precheckExcel(form)
-    inspection.value = 'focus'
+    const report = await apiClient.precheckExcel(form)
+    excelPrecheck.value = report
+    inspection.value = 'normal'
     ElMessage.success(`预检完成：${excelPrecheck.value.total_candidates} 条候选记录`)
+    void requestImportSummary({
+      filename: item.file.name,
+      source_type: 'excel',
+      total_candidates: report.total_candidates,
+      normal_candidates: report.normal_candidates,
+      needs_review_candidates: report.needs_review_candidates,
+      duplicate_candidates: report.duplicate_candidates,
+      abnormal_price_candidates: report.abnormal_price_candidates,
+      incomplete_candidates: report.incomplete_candidates,
+      no_quote_candidates: report.no_quote_candidates,
+      masked_candidates: report.masked_candidates,
+    }, report)
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -178,6 +243,11 @@ async function runQueue(excelImportMode: ExcelImportMode = 'all') {
   const candidates = recognized.reduce((sum, item) => sum + (item.candidateCount || 0), 0)
   if (failedCount.value) ElMessage.warning(`已完成 ${recognized.length} 个文件、${candidates} 条候选；${failedCount.value} 个文件可重试`)
   else ElMessage.success(`已完成 ${recognized.length} 个文件，共 ${candidates} 条候选记录`)
+  if (recognized.length) void requestImportSummary({
+    filename: queue.value.length === 1 ? queue.value[0].file.name : `${queue.value.length} 个报价文件`,
+    source_type: sourceType.value,
+    total_candidates: candidates,
+  })
 }
 
 async function submit() {
@@ -191,6 +261,7 @@ async function submit() {
 
 async function confirmExcelImport(mode: ExcelImportMode) {
   excelPrecheck.value = null
+  resetAgentSummary()
   await runQueue(mode)
 }
 
@@ -207,15 +278,6 @@ async function openInspection(view: PrecheckInspection) {
   inspectionPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 
-function inspectionTitle(view: PrecheckInspection) {
-  return {
-    normal: '可直接进入复核',
-    focus: '需重点检查',
-    duplicate: '重复报价',
-    abnormal: '异常波动',
-  }[view]
-}
-
 function formatMoney(value: number | null) {
   return value === null ? '—' : `¥${value}`
 }
@@ -228,9 +290,27 @@ function priceStatusLabel(status: string) {
 <template>
   <section class="view-panel import-view">
     <div class="section-heading">
-      <div><p class="eyebrow">QUOTE INTAKE</p><h2>把今天的报价表，先验明再入库</h2></div>
-      <p class="section-note">Excel 会先检查重复、缺价与异常波动；图片仍按识别结果分别进入复核。</p>
+      <div><h2>把今天的报价来源交给我</h2></div>
+      <p class="section-note">识别来源、调用解析、解释风险，再由你决定如何进入复核。</p>
     </div>
+
+    <section class="import-agent-guide" aria-live="polite">
+      <span class="import-agent-avatar">导</span>
+      <div class="import-agent-message">
+        <small>当前任务</small>
+        <strong>{{ agentHeadline }}</strong>
+        <p>{{ agentNarrative }}</p>
+        <ul v-if="importAgentSummary?.recommendations.length">
+          <li v-for="item in importAgentSummary.recommendations" :key="item">{{ item }}</li>
+        </ul>
+        <em v-if="importAgentSummary">{{ importAgentSummary.generated_by_model ? `本地模型 ${importAgentSummary.model} 已参与总结` : '已使用本地规则生成可靠建议' }}</em>
+      </div>
+      <ol class="import-agent-steps">
+        <li :class="{ active: agentPhase === 1, done: agentPhase > 1 }"><i>1</i><span>接收来源</span></li>
+        <li :class="{ active: agentPhase === 2, done: agentPhase > 2 }"><i>2</i><span>解析检查</span></li>
+        <li :class="{ active: agentPhase === 3 }"><i>3</i><span>进入复核</span></li>
+      </ol>
+    </section>
 
     <div class="import-layout">
       <div
@@ -253,7 +333,7 @@ function priceStatusLabel(status: string) {
           <div class="manifest-head"><span>本次入库清单</span><small>{{ imageFiles.length ? `${imageFiles.length} 张图片将读取图内所属板块` : '单个 Excel 将先进行入库预检' }}</small></div>
           <ul>
             <li v-for="(item, index) in queue" :key="item.id" :class="`queue-${item.status}`">
-              <i>{{ item.file.type.startsWith('image/') ? 'IMG' : 'XLS' }}</i>
+              <i>{{ item.file.type.startsWith('image/') ? '图片' : '表格' }}</i>
               <span>{{ item.file.name }}</span>
               <small>{{ (item.file.size / 1024 / 1024).toFixed(2) }} MB</small>
               <em :title="item.error">{{ statusLabel(item) }}</em>
@@ -264,16 +344,14 @@ function priceStatusLabel(status: string) {
         <label v-if="canUseManualText && !uploading" class="wide"><span>人工识别文本（可选）</span><textarea v-model="manualText" rows="4" placeholder="自动识别异常时，可为这一张图片粘贴报价原文"></textarea></label>
         <p v-else-if="queue.length > 1" class="auto-note wide"><b>所属板块识别已开启</b> · 系统优先读取图片标题下方的“××系列”栏目；未读到时才按型号词推断。</p>
         <section v-if="excelPrecheck" class="excel-precheck wide" aria-live="polite">
-          <header><div><span>EXCEL PRECHECK</span><strong>入库前已完成检查</strong></div><p>{{ excelPrecheck.total_candidates }} 条候选记录 · 可选择全部复核，或仅保留无风险记录</p></header>
+          <header><div><strong>入库前已完成检查</strong></div><p>{{ excelPrecheck.total_candidates }} 条候选记录 · 可选择全部复核，或仅保留无风险记录</p></header>
           <div class="precheck-metrics">
             <button :class="{ clear: true, active: inspection === 'normal' }" type="button" @click="openInspection('normal')"><small>可直接进入复核</small><b>{{ excelPrecheck.normal_candidates }}</b><em>查看清单 ↓</em></button>
             <button :class="{ active: inspection === 'focus' }" type="button" @click="openInspection('focus')"><small>需重点检查</small><b>{{ excelPrecheck.needs_review_candidates }}</b><em>查看疑点 ↓</em></button>
             <button :class="{ flagged: excelPrecheck.duplicate_candidates, active: inspection === 'duplicate' }" type="button" :disabled="!excelPrecheck.duplicate_candidates" @click="openInspection('duplicate')"><small>重复报价</small><b>{{ excelPrecheck.duplicate_candidates }}</b><em>查看重复 ↓</em></button>
             <button :class="{ flagged: excelPrecheck.abnormal_price_candidates, active: inspection === 'abnormal' }" type="button" :disabled="!excelPrecheck.abnormal_price_candidates" @click="openInspection('abnormal')"><small>异常波动</small><b>{{ excelPrecheck.abnormal_price_candidates }}</b><em>查看价差 ↓</em></button>
           </div>
-          <div class="precheck-note"><span>还发现</span><b>信息不完整 {{ excelPrecheck.incomplete_candidates }}</b><b>暂无报价 {{ excelPrecheck.no_quote_candidates }}</b><b>价格待确认 {{ excelPrecheck.masked_candidates }}</b></div>
           <section ref="inspectionPanel" class="precheck-inspection">
-            <header class="precheck-inspection-head"><div><span>CHECK LIST</span><strong>{{ inspectionTitle(inspection) }}</strong><p>点击上方统计切换清单；这里只核对，不会写入数据。</p></div><b>{{ inspectionRecords.length }} 条</b></header>
             <div class="precheck-inspection-table-wrap">
               <table class="precheck-inspection-table">
                 <thead><tr><th>来源位置</th><th>识别结果</th><th>本次价格</th><th>检查结果</th><th>原文</th></tr></thead>

@@ -81,7 +81,7 @@ onMounted(() => {
 <template>
   <section class="view-panel dashboard-view" v-loading="market.loading">
     <div class="section-heading">
-      <div><p class="eyebrow">TODAY'S SIGNAL</p><h2>行情变化一眼看清</h2></div>
+      <div><h2>行情变化一眼看清</h2></div>
       <button class="text-action" @click="$emit('navigate', 'quotes')">查看完整报价 →</button>
     </div>
 
@@ -94,19 +94,19 @@ onMounted(() => {
 
     <div class="dashboard-grid">
       <article class="chart-card">
-        <div class="chart-heading"><div class="card-title"><span>PRICE DELTA</span><h3>{{ activeBrand === 'all' ? '全品牌涨跌额分布' : `${activeBrand} 涨跌额分布` }}</h3></div><div class="brand-switch" aria-label="按品牌查看"><button :class="{ active: activeBrand === 'all' }" @click="activeBrand = 'all'">全部</button><button v-for="brand in brandOptions" :key="brand" :class="{ active: activeBrand === brand }" @click="activeBrand = brand">{{ brand }}</button></div></div>
+        <div class="chart-heading"><div class="card-title"><h3>{{ activeBrand === 'all' ? '全品牌涨跌额分布' : `${activeBrand} 涨跌额分布` }}</h3></div><div class="brand-switch" aria-label="按品牌查看"><button :class="{ active: activeBrand === 'all' }" @click="activeBrand = 'all'">全部</button><button v-for="brand in brandOptions" :key="brand" :class="{ active: activeBrand === brand }" @click="activeBrand = brand">{{ brand }}</button></div></div>
         <div ref="chartEl" class="delta-chart"></div>
       </article>
       <article class="action-card">
-        <div class="card-title"><span>NEXT ACTION</span><h3>今日处理队列</h3></div>
-        <button @click="$emit('navigate', 'import')"><b>01</b><span><strong>导入新报价</strong><small>支持 Excel 与图片</small></span><i>↗</i></button>
+        <div class="card-title"><h3>今日处理队列</h3></div>
+        <button @click="$emit('navigate', 'import')"><b>01</b><span><strong>交给导入智能体</strong><small>支持 Excel 与图片</small></span><i>↗</i></button>
         <button @click="$emit('navigate', 'review')"><b>02</b><span><strong>复核识别结果</strong><small>{{ market.dashboard?.pending_candidates || 0 }} 条等待处理</small></span><i>↗</i></button>
         <button @click="$emit('navigate', 'quotes')"><b>03</b><span><strong>查看价格历史</strong><small>定位异常涨跌</small></span><i>↗</i></button>
       </article>
     </div>
 
     <div class="ticker-board">
-      <div class="ticker-label"><span>{{ activeBrand === 'all' ? 'ALL BRANDS' : activeBrand }}</span><strong>价格脉冲</strong></div>
+      <div class="ticker-label"><span>{{ activeBrand === 'all' ? '全部品牌' : activeBrand }}</span><strong>价格脉冲</strong></div>
       <div class="ticker-flow" v-if="tape.length">
         <span v-for="item in tape" :key="item.model_key">
           {{ item.model }} {{ item.color || '' }}

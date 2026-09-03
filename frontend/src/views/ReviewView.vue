@@ -550,7 +550,7 @@ onMounted(async () => {
 <template>
   <section class="view-panel review-view">
     <div class="section-heading">
-      <div><p class="eyebrow">REVIEW QUEUE</p><h2>复核工作台</h2></div>
+      <div><h2>复核工作台</h2></div>
       <div class="review-actions">
         <button class="ghost-action" :disabled="!selectedBatch" @click="reviewAll('rejected')">全部拒绝</button>
         <button class="ghost-action approve" :disabled="!selectedBatch" @click="reviewAll('approved')">全部通过</button>

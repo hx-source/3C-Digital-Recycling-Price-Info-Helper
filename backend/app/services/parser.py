@@ -9,7 +9,7 @@ from app.models.entities import PriceStatus
 from app.services.normalizer import normalize_model, normalize_storage
 
 
-PARSER_VERSION = "v1.2"
+PARSER_VERSION = "v1.3"
 
 STORAGE_RE = re.compile(
     r"(?P<ram>\d{1,2})\s*[+＋/]\s*(?P<capacity>\d{2,4})\s*(?P<unit>GB|G|TB|T|g|t)?",
@@ -170,7 +170,12 @@ def should_skip(text: str) -> bool:
 def _price_status(token: str | None) -> tuple[PriceStatus, Decimal | None]:
     if not token:
         return PriceStatus.NO_QUOTE, None
-    if "*" in token:
+    # A standalone star means the source has no quoted price.  Stars mixed
+    # with digits (for example 13*2 or 4**0) represent wildcard digits and
+    # must be confirmed manually before entering price calculations.
+    if token == "*":
+        return PriceStatus.NO_QUOTE, None
+    if "*" in token and any(char.isdigit() for char in token):
         return PriceStatus.MASKED, None
     return PriceStatus.QUOTED, Decimal(token)
 
@@ -247,7 +252,7 @@ def parse_text_line(
         sequence = COLOR_SEQUENCE_RE.fullmatch(color_suffix)
         if sequence:
             model, variant = _model_and_variant(text[: storage_span[1]], storage_span, brand)
-            status = PriceStatus.MASKED if sequence.group("masked") else PriceStatus.NO_QUOTE
+            status = PriceStatus.NO_QUOTE
             colors = COLOR_TOKEN_RE.findall(sequence.group("colors"))
             return [
                 ParsedCandidate(
@@ -375,7 +380,11 @@ def parse_text_line(
                 storage=storage,
                 color="/".join(dict.fromkeys(colors)) or None,
                 variant=variant,
-                price_status=PriceStatus.MASKED if "*" in text else PriceStatus.NO_QUOTE,
+                price_status=(
+                    PriceStatus.MASKED
+                    if re.search(r"\d[\d*]*\*|\*[\d*]*\d", text)
+                    else PriceStatus.NO_QUOTE
+                ),
                 price=None,
                 confidence=0.58,
                 sheet_name=sheet_name,

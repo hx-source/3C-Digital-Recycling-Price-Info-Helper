@@ -38,7 +38,7 @@ onMounted(load)
 <template>
   <section class="view-panel quotes-view" v-loading="loading">
     <div class="section-heading">
-      <div><p class="eyebrow">PRICE LEDGER</p><h2>每一笔变化都有来源</h2></div>
+      <div><h2>每一笔变化都有来源</h2></div>
       <div class="search-box"><input v-model="search" placeholder="搜索型号、容量或颜色" @keyup.enter="load" /><button @click="load">搜索</button></div>
     </div>
 

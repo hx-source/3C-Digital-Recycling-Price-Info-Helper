@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     upload_dir: Path = Path("storage/uploads")
     max_upload_mb: int = 25
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen2.5:7b"
+    ollama_timeout_seconds: int = 90
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_DIR / ".env",

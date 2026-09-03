@@ -55,6 +55,16 @@ def test_preserves_masked_price() -> None:
     assert all(item.price_status == PriceStatus.MASKED for item in items)
 
 
+def test_standalone_star_means_no_quote() -> None:
+    items = parse_text_line(
+        "一加Ace5 12+256 黑钛*",
+        sheet_name="OPPO",
+        quote_date=QUOTE_DATE,
+    )
+    assert {item.color for item in items} == {"黑", "钛"}
+    assert all(item.price_status == PriceStatus.NO_QUOTE for item in items)
+
+
 def test_ignores_layout_placeholder() -> None:
     assert parse_text_line("325", sheet_name="OPPO", quote_date=QUOTE_DATE) == []
 
@@ -76,7 +86,7 @@ def test_splits_colors_when_price_is_missing() -> None:
     )
     assert {item.model for item in items} == {"Ace5"}
     assert {item.color for item in items} == {"黑", "钛"}
-    assert all(item.price_status == PriceStatus.MASKED for item in items)
+    assert all(item.price_status == PriceStatus.NO_QUOTE for item in items)
 
 
 def test_restores_oneplus_brand_when_ocr_drops_yi_prefix() -> None:

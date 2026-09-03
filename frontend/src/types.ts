@@ -169,3 +169,40 @@ export interface DashboardSummary {
   top_increases: PriceChange[]
   top_decreases: PriceChange[]
 }
+
+export interface AgentMessageInput {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface AgentSource {
+  label: string
+  detail: string
+}
+
+export interface AgentChatResponse {
+  answer: string
+  sources: AgentSource[]
+  tools_used: string[]
+  model: string
+}
+
+export interface ImportAgentSummaryRequest {
+  filename: string
+  source_type: 'excel' | 'image' | 'mixed'
+  total_candidates: number
+  normal_candidates?: number
+  needs_review_candidates?: number
+  duplicate_candidates?: number
+  abnormal_price_candidates?: number
+  incomplete_candidates?: number
+  no_quote_candidates?: number
+  masked_candidates?: number
+}
+
+export interface ImportAgentSummaryResponse {
+  summary: string
+  recommendations: string[]
+  generated_by_model: boolean
+  model: string
+}
