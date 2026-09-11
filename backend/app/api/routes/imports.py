@@ -3,15 +3,16 @@ from pathlib import Path
 import re
 import tempfile
 from typing import Literal
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.entities import BatchStatus, ImportBatch, PriceQuote, PriceStatus, QuoteCandidate, ReviewStatus, SourceType
+from app.models.entities import BatchStatus, ImportBatch, ImportTask, ImportTaskItem, ImportTaskItemStatus, ImportTaskStatus, PriceQuote, PriceStatus, QuoteCandidate, ReviewAuditLog, ReviewStatus, SourceType
 from app.schemas.quotes import (
     BatchSummary,
     BatchQuoteDateUpdate,
@@ -23,20 +24,130 @@ from app.schemas.quotes import (
     CandidateUpdate,
     CommitResult,
     ExcelPrecheckResult,
+    ImportTaskRead,
     PurgeAllDataRequest,
+    ReviewAuditLogRead,
     SourceGroupReplaceRequest,
     SourceLineReparseRequest,
 )
-from app.services.import_service import candidate_from_parsed, create_import, detect_source_type, reparse_excel, reparse_image
+from app.services.import_service import candidate_from_parsed, create_import, detect_source_type, reparse_excel, reparse_image, save_upload
+from app.services.import_task_service import run_import_task
+from app.services.market_monitor_service import create_monitor_run, run_market_monitor
 from app.services.excel_importer import ExcelQuoteImporter
 from app.services.excel_precheck import inspect_excel_candidates
 from app.services.excel_source_preview import build_excel_source_context
 from app.services.ocr_provider import OcrConfigurationError, locate_image_cell
 from app.services.parser import parse_text_line
 from app.services.quote_service import commit_batch, update_candidate
+from app.services.audit_service import (
+    HUMAN,
+    MANUAL_APPROVE,
+    MANUAL_EDIT,
+    MANUAL_REJECT,
+    add_audit_log,
+    candidate_snapshot,
+    changed_fields,
+)
 
 
 router = APIRouter()
+
+
+@router.post("/tasks", response_model=ImportTaskRead, status_code=status.HTTP_202_ACCEPTED)
+def create_background_import_task(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    source_name: str = Form("郑州思物通讯"),
+    quote_date: date | None = Form(None),
+    manual_text: str | None = Form(None),
+    excel_import_mode: Literal["all", "normal_only"] = Form("all"),
+    db: Session = Depends(get_db),
+) -> ImportTask:
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少选择一个报价文件")
+    if len(files) > 30:
+        raise HTTPException(status_code=400, detail="单次最多导入 30 个文件")
+    if manual_text and len(files) > 1:
+        raise HTTPException(status_code=400, detail="批量图片请留空人工文本；每张图片会自动识别板块")
+    try:
+        for upload in files:
+            detect_source_type(upload.filename or "")
+        task = ImportTask(
+            id=str(uuid4()),
+            status=ImportTaskStatus.QUEUED,
+            source_name=source_name,
+            quote_date=quote_date,
+            excel_import_mode=excel_import_mode,
+            manual_text=manual_text,
+            total_files=len(files),
+        )
+        db.add(task)
+        db.flush()
+        for position, upload in enumerate(files):
+            path, sha256 = save_upload(upload)
+            db.add(ImportTaskItem(
+                task_id=task.id,
+                position=position,
+                filename=upload.filename or path.name,
+                stored_path=str(path),
+                file_sha256=sha256,
+                status=ImportTaskItemStatus.QUEUED,
+                stage="queued",
+                progress=0,
+            ))
+        db.commit()
+        db.refresh(task)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    background_tasks.add_task(run_import_task, task.id)
+    return task
+
+
+@router.get("/tasks/{task_id}", response_model=ImportTaskRead)
+def get_background_import_task(task_id: str, db: Session = Depends(get_db)) -> ImportTask:
+    task = db.get(ImportTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+    return task
+
+
+@router.post("/tasks/{task_id}/retry", response_model=ImportTaskRead, status_code=status.HTTP_202_ACCEPTED)
+def retry_background_import_task(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> ImportTask:
+    task = db.get(ImportTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="导入任务不存在")
+    if task.status in {ImportTaskStatus.QUEUED, ImportTaskStatus.RUNNING}:
+        raise HTTPException(status_code=409, detail="任务仍在处理中")
+    failed = [item for item in task.items if item.status == ImportTaskItemStatus.FAILED]
+    if not failed:
+        raise HTTPException(status_code=409, detail="当前任务没有可重试的失败文件")
+    for item in failed:
+        if item.batch_id:
+            failed_batch = db.get(ImportBatch, item.batch_id)
+            if failed_batch and failed_batch.status in {BatchStatus.FAILED, BatchStatus.NEEDS_OCR} and not failed_batch.quotes:
+                db.delete(failed_batch)
+                db.flush()
+                item.batch_id = None
+        item.status = ImportTaskItemStatus.QUEUED
+        item.stage = "queued"
+        item.progress = 0
+        item.error_message = None
+        item.completed_at = None
+    task.status = ImportTaskStatus.QUEUED
+    task.completed_at = None
+    task.error_message = None
+    task.completed_files = task.succeeded_files
+    task.failed_files = 0
+    task.progress = round(sum(item.progress for item in task.items) / task.total_files)
+    db.commit()
+    db.refresh(task)
+    background_tasks.add_task(run_import_task, task.id)
+    return task
 
 
 def _stored_source_region(candidate: QuoteCandidate) -> dict[str, int | bool] | None:
@@ -368,6 +479,7 @@ def replace_candidate_source_group(
     _ensure_candidates_deletable(existing)
 
     existing_by_id = {candidate.id: candidate for candidate in existing}
+    before_by_id = {candidate.id: candidate_snapshot(candidate) for candidate in existing}
     kept_ids: set[int] = set()
     output: list[QuoteCandidate] = []
     for item in payload.items:
@@ -424,8 +536,32 @@ def replace_candidate_source_group(
 
     for candidate in existing:
         if candidate.id not in kept_ids:
+            add_audit_log(
+                db,
+                action_type=MANUAL_EDIT,
+                operator_type=HUMAN,
+                before_data=before_by_id[candidate.id],
+                after_data=None,
+                batch_id=candidate.batch_id,
+                candidate_id=candidate.id,
+                reason="整行编辑中删除报价",
+            )
             db.delete(candidate)
     db.flush()
+    for candidate in output:
+        before_data = before_by_id.get(candidate.id)
+        after_data = candidate_snapshot(candidate)
+        if before_data is None or changed_fields(before_data, after_data):
+            add_audit_log(
+                db,
+                action_type=MANUAL_EDIT,
+                operator_type=HUMAN,
+                before_data=before_data,
+                after_data=after_data,
+                batch_id=candidate.batch_id,
+                candidate_id=candidate.id,
+                reason="人工编辑整行报价" if before_data else "人工在来源行中新增报价",
+            )
     _refresh_batch_candidate_counts(db, anchor.batch)
     db.commit()
     return output
@@ -491,6 +627,42 @@ def get_import(batch_id: int, db: Session = Depends(get_db)) -> ImportBatch:
     return batch
 
 
+@router.get("/candidates/{candidate_id}/audit-logs", response_model=list[ReviewAuditLogRead])
+def list_candidate_audit_logs(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    limit: int = Query(100, ge=1, le=500),
+) -> list[ReviewAuditLog]:
+    return list(
+        db.scalars(
+            select(ReviewAuditLog)
+            .where(ReviewAuditLog.candidate_id == candidate_id)
+            .order_by(ReviewAuditLog.created_at.desc(), ReviewAuditLog.id.desc())
+            .limit(limit)
+        ).all()
+    )
+
+
+@router.get("/{batch_id}/audit-logs", response_model=list[ReviewAuditLogRead])
+def list_batch_audit_logs(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    action_type: str | None = Query(None, max_length=40),
+    limit: int = Query(200, ge=1, le=1000),
+) -> list[ReviewAuditLog]:
+    filters = [ReviewAuditLog.batch_id == batch_id]
+    if action_type:
+        filters.append(ReviewAuditLog.action_type == action_type)
+    return list(
+        db.scalars(
+            select(ReviewAuditLog)
+            .where(*filters)
+            .order_by(ReviewAuditLog.created_at.desc(), ReviewAuditLog.id.desc())
+            .limit(limit)
+        ).all()
+    )
+
+
 @router.delete("/purge-all")
 def purge_all_import_data(
     payload: PurgeAllDataRequest,
@@ -511,6 +683,7 @@ def purge_all_import_data(
         _remove_managed_source_file(batch)
 
     try:
+        db.execute(delete(ReviewAuditLog))
         # PriceQuote references both candidates and batches, so delete it first
         # instead of relying on database-specific cascading behaviour.
         db.execute(delete(PriceQuote))
@@ -608,7 +781,7 @@ def list_candidates(
     review_status: ReviewStatus | None = None,
     sheet_name: str | None = None,
     price_status: PriceStatus | None = None,
-    filter_mode: Literal["all", "low_confidence", "incomplete", "merged_source"] = "all",
+    filter_mode: Literal["all", "low_confidence", "incomplete", "merged_source", "auto_approved"] = "all",
     search: str | None = Query(None, max_length=120),
     sort: Literal["confidence_asc", "confidence_desc", "source_asc"] = "confidence_asc",
 ) -> CandidatePage:
@@ -620,6 +793,21 @@ def list_candidates(
             func.coalesce(func.sum(case((QuoteCandidate.confidence < 0.75, 1), else_=0)), 0).label("low_confidence"),
             func.coalesce(func.sum(case((_incomplete_candidate_condition(), 1), else_=0)), 0).label("incomplete"),
             func.coalesce(func.sum(case((QuoteCandidate.review_status == ReviewStatus.APPROVED, 1), else_=0)), 0).label("approved"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            (
+                                QuoteCandidate.review_status == ReviewStatus.APPROVED
+                            )
+                            & QuoteCandidate.review_note.like("[智能批量审核]%"),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("auto_approved"),
             func.coalesce(func.sum(case((QuoteCandidate.review_status == ReviewStatus.REJECTED, 1), else_=0)), 0).label("rejected"),
         ).where(*base_filters)
     ).one()
@@ -647,6 +835,13 @@ def list_candidates(
         filters.append(_incomplete_candidate_condition())
     if filter_mode == "merged_source":
         filters.append(QuoteCandidate.id.in_([candidate.id for candidate in merged_candidates] or [-1]))
+    if filter_mode == "auto_approved":
+        filters.extend(
+            [
+                QuoteCandidate.review_status == ReviewStatus.APPROVED,
+                QuoteCandidate.review_note.like("[智能批量审核]%"),
+            ]
+        )
     if search:
         keyword = f"%{search.strip()}%"
         filters.append(
@@ -680,7 +875,25 @@ def patch_candidate(candidate_id: int, payload: CandidateUpdate, db: Session = D
     if not candidate:
         raise HTTPException(status_code=404, detail="候选记录不存在")
     try:
-        update_candidate(candidate, payload.model_dump(exclude_unset=True))
+        values = payload.model_dump(exclude_unset=True)
+        before_data = candidate_snapshot(candidate)
+        update_candidate(candidate, values)
+        requested_business_fields = set(values) - {"review_status", "review_note"}
+        action_type = MANUAL_EDIT
+        if not requested_business_fields and values.get("review_status") == ReviewStatus.APPROVED:
+            action_type = MANUAL_APPROVE
+        elif not requested_business_fields and values.get("review_status") == ReviewStatus.REJECTED:
+            action_type = MANUAL_REJECT
+        add_audit_log(
+            db,
+            action_type=action_type,
+            operator_type=HUMAN,
+            before_data=before_data,
+            after_data=candidate_snapshot(candidate),
+            batch_id=candidate.batch_id,
+            candidate_id=candidate.id,
+            reason=values.get("review_note") or "人工修改候选报价",
+        )
         db.commit()
         db.refresh(candidate)
         return candidate
@@ -698,7 +911,18 @@ def bulk_review(batch_id: int, payload: BulkReviewRequest, db: Session = Depends
         )
     ).all()
     for candidate in candidates:
+        before_data = candidate_snapshot(candidate)
         candidate.review_status = payload.review_status
+        add_audit_log(
+            db,
+            action_type=MANUAL_APPROVE if payload.review_status == ReviewStatus.APPROVED else MANUAL_REJECT,
+            operator_type=HUMAN,
+            before_data=before_data,
+            after_data=candidate_snapshot(candidate),
+            batch_id=candidate.batch_id,
+            candidate_id=candidate.id,
+            reason="人工批量复核",
+        )
     db.commit()
     return {"updated": len(candidates)}
 
@@ -711,7 +935,18 @@ def review_all(
 ) -> dict[str, int]:
     candidates = db.scalars(select(QuoteCandidate).where(QuoteCandidate.batch_id == batch_id)).all()
     for candidate in candidates:
+        before_data = candidate_snapshot(candidate)
         candidate.review_status = review_status
+        add_audit_log(
+            db,
+            action_type=MANUAL_APPROVE if review_status == ReviewStatus.APPROVED else MANUAL_REJECT,
+            operator_type=HUMAN,
+            before_data=before_data,
+            after_data=candidate_snapshot(candidate),
+            batch_id=candidate.batch_id,
+            candidate_id=candidate.id,
+            reason="人工整批复核",
+        )
     db.commit()
     return {"updated": len(candidates)}
 
@@ -744,12 +979,14 @@ def reparse_excel_endpoint(batch_id: int, db: Session = Depends(get_db)) -> Impo
 
 
 @router.post("/{batch_id}/commit", response_model=CommitResult)
-def commit_import(batch_id: int, db: Session = Depends(get_db)) -> CommitResult:
+def commit_import(batch_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> CommitResult:
     batch = db.get(ImportBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="导入批次不存在")
     try:
         inserted, skipped = commit_batch(db, batch)
+        monitor_run = create_monitor_run(db, batch_id=batch.id, trigger_type="publish")
+        background_tasks.add_task(run_market_monitor, monitor_run.id)
         return CommitResult(batch_id=batch.id, inserted=inserted, skipped=skipped, status=batch.status)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -3,9 +3,9 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiClient, errorMessage } from '../api'
 import { useMarketStore } from '../stores/market'
-import type { Batch, Candidate, CandidateFilterSummary, CandidateSourcePreview, PriceStatus, ReviewStatus } from '../types'
+import type { Batch, Candidate, CandidateFilterSummary, CandidateSourcePreview, PriceStatus, ReviewAuditLog, ReviewBatchDiagnosis, ReviewDiagnosis, ReviewDiagnosisField, ReviewQualityStats, ReviewSample, ReviewStatus } from '../types'
 
-type QuickFilter = 'all' | 'pending' | 'low_confidence' | 'incomplete' | 'merged_source' | 'approved' | 'rejected'
+type QuickFilter = 'all' | 'pending' | 'low_confidence' | 'incomplete' | 'merged_source' | 'auto_approved' | 'approved' | 'rejected'
 type CandidateSort = 'confidence_asc' | 'confidence_desc' | 'source_asc'
 type SourceGroupItem = Candidate & { isNew?: boolean }
 type BatchScope = 'active' | 'history'
@@ -35,13 +35,31 @@ let editorSourceRequestVersion = 0
 const sourceDialogOpen = ref(false)
 const sourceLoading = ref(false)
 const sourcePreview = ref<CandidateSourcePreview | null>(null)
+const diagnosisTarget = ref<Candidate | null>(null)
+const diagnosis = ref<ReviewDiagnosis | null>(null)
+const diagnosisLoading = ref(false)
+const diagnosisApplying = ref(false)
+const diagnosisFields = ref<ReviewDiagnosisField[]>([])
+const batchDiagnosis = ref<ReviewBatchDiagnosis | null>(null)
+const batchDiagnosisLoading = ref(false)
+const batchDiagnosisApplying = ref(false)
+const auditDialogOpen = ref(false)
+const auditLoading = ref(false)
+const auditLogs = ref<ReviewAuditLog[]>([])
+const auditTarget = ref<Candidate | null>(null)
+const auditActionType = ref('')
+const qualityDialogOpen = ref(false)
+const qualityLoading = ref(false)
+const qualityStats = ref<ReviewQualityStats | null>(null)
+const reviewSamples = ref<ReviewSample[]>([])
+let diagnosisRequestVersion = 0
 const quickFilter = ref<QuickFilter>('pending')
 const priceStatus = ref<PriceStatus | ''>('')
 const sheetName = ref('')
 const sort = ref<CandidateSort>('confidence_asc')
 const keyword = ref('')
 const appliedKeyword = ref('')
-const summary = ref<CandidateFilterSummary>({ all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, rejected: 0, merged_source_groups: 0 })
+const summary = ref<CandidateFilterSummary>({ all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, auto_approved: 0, rejected: 0, merged_source_groups: 0 })
 
 const selectedBatch = computed(() => market.batches.find(item => item.id === selectedBatchId.value) || null)
 const activeBatches = computed(() => market.batches.filter(item => item.status !== 'committed'))
@@ -61,6 +79,7 @@ const quickFilters = computed(() => [
   { key: 'low_confidence' as const, label: '低置信度', count: summary.value.low_confidence, tone: 'warning' },
   { key: 'incomplete' as const, label: '信息不完整', count: summary.value.incomplete, tone: 'warning' },
   { key: 'merged_source' as const, label: '需拆分', count: summary.value.merged_source_groups, tone: 'warning' },
+  { key: 'auto_approved' as const, label: '自动通过', count: summary.value.auto_approved },
   { key: 'approved' as const, label: '已通过', count: summary.value.approved },
   { key: 'rejected' as const, label: '已拒绝', count: summary.value.rejected },
 ])
@@ -133,16 +152,80 @@ function priceStatusLabel(status: string) {
   return { quoted: '明确报价', no_quote: '暂无报价', masked: '价格遮挡' }[status] || status
 }
 
+function diagnosisSeverityLabel(value: ReviewDiagnosis['severity']) {
+  return { normal: '未发现明显异常', warning: '建议重点核对', danger: '高风险疑点' }[value]
+}
+
+function agentStepPhaseLabel(value: ReviewDiagnosis['workflow_steps'][number]['phase']) {
+  return { planning: '规划', tool: '工具', reasoning: '推理', verification: '校验' }[value]
+}
+
+function diagnosisValue(value: string | number | null) {
+  if (value === null || value === '') return '—'
+  return {
+    quoted: '明确报价', no_quote: '暂无报价', masked: '价格遮挡',
+    pending: '待复核', approved: '通过', rejected: '拒绝',
+  }[String(value)] || String(value)
+}
+
+function diagnosisTargetLabel(row: Candidate) {
+  return [row.brand, row.model, row.storage, row.color, row.variant].filter(Boolean).join(' · ')
+}
+
+const auditActionOptions = [
+  ['auto_approve', '自动通过'],
+  ['revoke_auto_approve', '撤销自动通过'],
+  ['manual_approve', '人工通过'],
+  ['manual_reject', '人工拒绝'],
+  ['manual_edit', '人工修改'],
+  ['agent_suggestion_apply', '采用智能体建议'],
+  ['monitor_remediation_apply', '行情异常修正'],
+  ['mark_no_issue', '确认无问题'],
+  ['sample_selected', '选入自动审批抽查'],
+  ['sample_passed', '抽查确认正确'],
+  ['sample_failed', '抽查发现问题'],
+]
+
+function auditActionLabel(value: string) {
+  return Object.fromEntries(auditActionOptions)[value] || value
+}
+
+function auditOperatorLabel(value: string) {
+  return { human: '人工', agent: '智能体', system: '系统' }[value] || value
+}
+
+function auditFieldLabel(value: string) {
+  return {
+    brand: '品牌', model: '型号', model_normalized: '标准型号', storage: '容量', color: '颜色',
+    variant: '版本', price_status: '价格状态', price: '价格', confidence: '置信度',
+    review_status: '复核状态', review_note: '复核备注', quote_date: '报价日期',
+  }[value] || value
+}
+
+function auditValue(log: ReviewAuditLog, field: string, side: 'before_data' | 'after_data') {
+  const value = log[side]?.[field]
+  if (value === null || value === undefined || value === '') return '—'
+  return diagnosisValue(String(value))
+}
+
+function auditTime(value: string) {
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+
 function quickReviewStatus(): ReviewStatus | undefined {
   return ['pending', 'approved', 'rejected'].includes(quickFilter.value)
     ? quickFilter.value as ReviewStatus
     : undefined
 }
 
-function quickFilterMode(): 'all' | 'low_confidence' | 'incomplete' | 'merged_source' {
-  return ['low_confidence', 'incomplete', 'merged_source'].includes(quickFilter.value)
-    ? quickFilter.value as 'low_confidence' | 'incomplete' | 'merged_source'
+function quickFilterMode(): 'all' | 'low_confidence' | 'incomplete' | 'merged_source' | 'auto_approved' {
+  return ['low_confidence', 'incomplete', 'merged_source', 'auto_approved'].includes(quickFilter.value)
+    ? quickFilter.value as 'low_confidence' | 'incomplete' | 'merged_source' | 'auto_approved'
     : 'all'
+}
+
+function isAutoApproved(row: Candidate) {
+  return row.review_status === 'approved' && Boolean(row.review_note?.startsWith('[智能批量审核]'))
 }
 
 async function loadCandidates() {
@@ -238,6 +321,254 @@ async function viewSource(row: Candidate) {
   }
 }
 
+async function loadAuditLogs() {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  auditLoading.value = true
+  try {
+    auditLogs.value = auditTarget.value
+      ? await apiClient.candidateAuditLogs(auditTarget.value.id)
+      : await apiClient.batchAuditLogs(batchId, auditActionType.value)
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+    auditLogs.value = []
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+async function openCandidateAudit(row: Candidate) {
+  auditTarget.value = row
+  auditActionType.value = ''
+  auditDialogOpen.value = true
+  await loadAuditLogs()
+}
+
+async function openBatchAudit() {
+  if (!selectedBatchId.value) return
+  auditTarget.value = null
+  auditActionType.value = ''
+  auditDialogOpen.value = true
+  await loadAuditLogs()
+}
+
+async function loadReviewQuality() {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  qualityLoading.value = true
+  try {
+    ;[qualityStats.value, reviewSamples.value] = await Promise.all([
+      apiClient.reviewQualityStats(batchId),
+      apiClient.reviewSamples(batchId),
+    ])
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    qualityLoading.value = false
+  }
+}
+
+async function openReviewQuality() {
+  qualityDialogOpen.value = true
+  await loadReviewQuality()
+}
+
+async function generateSamples() {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  qualityLoading.value = true
+  try {
+    const result = await apiClient.generateReviewSamples(batchId)
+    reviewSamples.value = result.items
+    qualityStats.value = await apiClient.reviewQualityStats(batchId)
+    ElMessage.success(result.created_count ? `已新增 ${result.created_count} 条随机抽查记录` : '当前自动通过记录已全部抽取或没有可抽查数据')
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    qualityLoading.value = false
+  }
+}
+
+async function decideSample(sample: ReviewSample, decision: 'passed' | 'failed') {
+  try {
+    if (decision === 'failed') {
+      await ElMessageBox.confirm(
+        `确认“${diagnosisTargetLabel(sample.candidate)}”存在问题？系统会撤销自动通过并退回待复核。`,
+        '抽查发现问题',
+        { confirmButtonText: '确认并退回复核', cancelButtonText: '取消', type: 'warning' },
+      )
+    }
+    await apiClient.decideReviewSample(sample.id, decision)
+    await Promise.all([loadReviewQuality(), loadCandidates(), market.refresh()])
+    ElMessage.success(decision === 'passed' ? '已记录为抽查正确' : '已撤销自动通过并退回待复核')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
+function closeDiagnosis() {
+  diagnosisRequestVersion += 1
+  diagnosisTarget.value = null
+  diagnosis.value = null
+  diagnosisFields.value = []
+  diagnosisLoading.value = false
+}
+
+function closeReviewAgent() {
+  closeDiagnosis()
+  batchDiagnosis.value = null
+  batchDiagnosisLoading.value = false
+}
+
+async function runBatchDiagnosis() {
+  const batchId = selectedBatchId.value
+  if (!batchId) return
+  closeDiagnosis()
+  batchDiagnosis.value = null
+  batchDiagnosisLoading.value = true
+  try {
+    let result = await apiClient.diagnoseBatch(batchId)
+    let approvedCount = 0
+    if (result.pending_safe_count && selectedBatch.value?.status !== 'committed') {
+      const approved = await apiClient.approveSafeBatchCandidates(batchId, result.batch_signature)
+      approvedCount = approved.approved_count
+      result = await apiClient.diagnoseBatch(batchId)
+      await Promise.all([loadCandidates(), market.refresh()])
+    }
+    batchDiagnosis.value = result
+    ElMessage.success(
+      approvedCount
+        ? `已自动通过 ${approvedCount} 条高置信安全记录，留下 ${result.warning_count + result.danger_count} 条待人工审核`
+        : `已审核 ${result.scanned_count} 条，留下 ${result.warning_count + result.danger_count} 条待人工审核`,
+    )
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+    batchDiagnosis.value = null
+  } finally {
+    batchDiagnosisLoading.value = false
+  }
+}
+
+async function approveBatchSafeCandidates() {
+  const batchId = selectedBatchId.value
+  const result = batchDiagnosis.value
+  if (!batchId || !result || !result.pending_safe_count) return
+  try {
+    await ElMessageBox.confirm(
+      `将把规则检查未发现明显异常的 ${result.pending_safe_count} 条待复核记录标记为通过。风险记录不会被修改，发布仍需你手动确认。`,
+      '批量通过无风险记录',
+      { confirmButtonText: '确认批量通过', cancelButtonText: '取消', type: 'warning' },
+    )
+    batchDiagnosisApplying.value = true
+    const response = await apiClient.approveSafeBatchCandidates(batchId, result.batch_signature)
+    ElMessage.success(`已通过 ${response.approved_count} 条，剩余 ${response.remaining_pending} 条待复核`)
+    closeReviewAgent()
+    await Promise.all([loadCandidates(), market.refresh()])
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  } finally {
+    batchDiagnosisApplying.value = false
+  }
+}
+
+async function revokeAutoApproval(row: Candidate) {
+  try {
+    await ElMessageBox.confirm(
+      `确认取消“${diagnosisTargetLabel(row)}”的自动通过状态？取消后会回到待复核。`,
+      '撤销自动通过',
+      { confirmButtonText: '确认撤销', cancelButtonText: '取消', type: 'warning' },
+    )
+    await apiClient.revokeAutoApproval(row.id)
+    closeReviewAgent()
+    await Promise.all([loadCandidates(), market.refresh()])
+    ElMessage.success('已撤销该记录的自动通过状态')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  }
+}
+
+async function runDiagnosis(row: Candidate) {
+  const requestVersion = ++diagnosisRequestVersion
+  diagnosisTarget.value = row
+  diagnosis.value = null
+  diagnosisFields.value = []
+  diagnosisLoading.value = true
+  try {
+    const result = await apiClient.diagnoseCandidate(row.id)
+    if (requestVersion !== diagnosisRequestVersion) return
+    diagnosis.value = result
+    diagnosisFields.value = result.proposed_changes.map(item => item.field)
+  } catch (error) {
+    if (requestVersion !== diagnosisRequestVersion) return
+    ElMessage.error(errorMessage(error))
+    closeDiagnosis()
+  } finally {
+    if (requestVersion === diagnosisRequestVersion) diagnosisLoading.value = false
+  }
+}
+
+async function applyDiagnosis() {
+  const target = diagnosisTarget.value
+  const result = diagnosis.value
+  if (!target || !result || !diagnosisFields.value.length) return
+  try {
+    await ElMessageBox.confirm(
+      `将采用 ${diagnosisFields.value.length} 项诊断建议，并把这条记录标记为已完成复核。原始识别置信度会保留。`,
+      '确认采用诊断建议',
+      { confirmButtonText: '确认采用', cancelButtonText: '取消', type: 'warning' },
+    )
+    diagnosisApplying.value = true
+    const response = await apiClient.applyCandidateDiagnosis(target.id, {
+      candidate_signature: result.candidate_signature,
+      decision: 'apply_suggestions',
+      fields: diagnosisFields.value,
+      agent_run_id: result.agent_run_id,
+    })
+    ElMessage.success(`已采用建议：${response.applied_fields.join('、')}`)
+    closeReviewAgent()
+    await Promise.all([loadCandidates(), market.refresh()])
+    await ElMessageBox.alert(response.verification_summary, '自动复查完成', {
+      confirmButtonText: '知道了',
+      type: response.remaining_issue_types.length ? 'warning' : 'success',
+    })
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  } finally {
+    diagnosisApplying.value = false
+  }
+}
+
+async function markDiagnosisNoIssue() {
+  const target = diagnosisTarget.value
+  const result = diagnosis.value
+  if (!target || !result) return
+  try {
+    await ElMessageBox.confirm(
+      '确认已对照来源检查，并将这条记录标记为通过？原始识别置信度会继续保留。',
+      '标记为无问题',
+      { confirmButtonText: '确认无问题', cancelButtonText: '取消' },
+    )
+    diagnosisApplying.value = true
+    const response = await apiClient.applyCandidateDiagnosis(target.id, {
+      candidate_signature: result.candidate_signature,
+      decision: 'mark_no_issue',
+      fields: [],
+      agent_run_id: result.agent_run_id,
+    })
+    ElMessage.success('已完成人工确认')
+    closeReviewAgent()
+    await Promise.all([loadCandidates(), market.refresh()])
+    await ElMessageBox.alert(response.verification_summary, '自动复查完成', {
+      confirmButtonText: '知道了',
+      type: response.remaining_issue_types.length ? 'warning' : 'success',
+    })
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
+  } finally {
+    diagnosisApplying.value = false
+  }
+}
+
 function regionStyle() {
   const region = sourcePreview.value?.region
   if (!region) return {}
@@ -280,6 +611,7 @@ async function saveEdit() {
       review_note: editing.review_note,
     })
     dialogOpen.value = false
+    closeReviewAgent()
     ElMessage.success('已保存复核结果')
     await loadCandidates()
   } catch (error) {
@@ -315,6 +647,7 @@ async function saveSourceGroup() {
       })),
     )
     sourceGroupDialogOpen.value = false
+    closeReviewAgent()
     ElMessage.success(`已保存这一行的 ${sourceGroup.value.length} 条报价`)
     await Promise.all([loadCandidates(), market.refresh()])
   } catch (error) {
@@ -363,6 +696,7 @@ async function reparseSourceGroup() {
     sourceGroupAnchorId.value = sourceGroup.value[0]?.id || candidateId
     sourceGroupRawText.value = sourceGroup.value[0]?.raw_text || sourceGroupRawText.value
     ElMessage.success(`已重新拆分为 ${sourceGroup.value.length} 条报价`)
+    closeReviewAgent()
     await Promise.all([loadCandidates(), market.refresh()])
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(errorMessage(error))
@@ -379,6 +713,7 @@ async function deleteCandidate(row: Candidate) {
       { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
     )
     await apiClient.deleteCandidate(row.id)
+    closeReviewAgent()
     ElMessage.success('已删除这条报价')
     await Promise.all([loadCandidates(), market.refresh()])
   } catch (error) {
@@ -398,6 +733,7 @@ async function deleteSourceGroup() {
     const result = await apiClient.deleteCandidateSourceGroup(candidateId)
     sourceGroupDialogOpen.value = false
     sourceGroup.value = []
+    closeReviewAgent()
     ElMessage.success(`已删除这一行的 ${result.deleted} 条报价`)
     await Promise.all([loadCandidates(), market.refresh()])
   } catch (error) {
@@ -407,7 +743,12 @@ async function deleteSourceGroup() {
 
 async function reviewOne(row: Candidate, status: 'approved' | 'rejected') {
   try {
-    await apiClient.updateCandidate(row.id, { review_status: status })
+    const previous = row.review_note ? `；原记录：${row.review_note}` : ''
+    await apiClient.updateCandidate(row.id, {
+      review_status: status,
+      review_note: `[人工复核] ${statusLabel(status)}${previous}`.slice(0, 500),
+    })
+    closeReviewAgent()
     await loadCandidates()
     await market.refresh()
   } catch (error) {
@@ -420,6 +761,7 @@ async function reviewAll(status: 'approved' | 'rejected') {
   await ElMessageBox.confirm(`确认将本批次全部标记为“${statusLabel(status)}”？`, '批量复核')
   try {
     await apiClient.reviewAll(selectedBatchId.value, status)
+    closeReviewAgent()
     await loadCandidates()
     await market.refresh()
   } catch (error) {
@@ -432,6 +774,7 @@ async function commit() {
   await ElMessageBox.confirm('发布后会写入正式报价历史，并参与后续涨跌比较。', '发布本批次')
   try {
     const result = await apiClient.commit(selectedBatchId.value)
+    closeReviewAgent()
     ElMessage.success(`已发布 ${result.inserted} 条报价`)
     await market.refresh()
     await loadCandidates()
@@ -451,13 +794,14 @@ async function deleteSelectedBatch() {
       { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
     )
     const result = await apiClient.deleteBatch(batch.id)
+    closeReviewAgent()
     await market.refresh()
     const next = market.batches.find(item => item.status === 'review') || market.batches[0] || null
     selectedBatchId.value = next?.id || null
     if (!next) {
       candidates.value = []
       total.value = 0
-      summary.value = { all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, rejected: 0, merged_source_groups: 0 }
+      summary.value = { all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, auto_approved: 0, rejected: 0, merged_source_groups: 0 }
     }
     ElMessage.success(`已删除该批次及 ${result.deleted_candidates} 条待复核记录`)
   } catch (error) {
@@ -481,10 +825,11 @@ async function purgeAllData() {
       },
     )
     const result = await apiClient.purgeAllData(value)
+    closeReviewAgent()
     selectedBatchId.value = null
     candidates.value = []
     total.value = 0
-    summary.value = { all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, rejected: 0, merged_source_groups: 0 }
+    summary.value = { all: 0, pending: 0, low_confidence: 0, incomplete: 0, approved: 0, auto_approved: 0, rejected: 0, merged_source_groups: 0 }
     batchScope.value = 'active'
     resetFilters()
     await market.refresh()
@@ -504,6 +849,7 @@ async function reopenSelectedBatch() {
       { confirmButtonText: '确认撤回', cancelButtonText: '取消', type: 'warning' },
     )
     const result = await apiClient.reopenBatchForReview(batch.id)
+    closeReviewAgent()
     await Promise.all([market.refresh(), loadCandidates()])
     ElMessage.success(`已撤回 ${result.removed_quotes} 条正式报价，${result.reset_candidates} 条记录已回到待复核`)
   } catch (error) {
@@ -523,6 +869,7 @@ async function saveBatchQuoteDate() {
       confirmButtonText: '确认保存日期', cancelButtonText: '取消', type: 'warning',
     })
     const updated = await apiClient.updateBatchQuoteDate(batch.id, batchQuoteDate.value)
+    closeReviewAgent()
     batchQuoteDate.value = updated.quote_date || ''
     await Promise.all([market.refresh(), loadCandidates()])
     ElMessage.success(`已将该批次报价日期更正为 ${batchQuoteDate.value}`)
@@ -535,6 +882,7 @@ watch([selectedBatchId, quickFilter, priceStatus, sheetName, sort, appliedKeywor
   page.value = 1
   loadCandidates()
 })
+watch(selectedBatchId, closeReviewAgent)
 watch(page, loadCandidates)
 watch(selectedBatch, batch => {
   batchQuoteDate.value = batch?.quote_date || ''
@@ -550,8 +898,11 @@ onMounted(async () => {
 <template>
   <section class="view-panel review-view">
     <div class="section-heading">
-      <div><h2>复核工作台</h2></div>
+      <div><h2>复核工作台</h2><p class="review-agent-hint">一键自动通过高置信安全记录，只留下需要人工判断的数据并给出处理建议。</p></div>
       <div class="review-actions">
+        <button class="one-click-audit" :disabled="!selectedBatch || batchDiagnosisLoading" @click="runBatchDiagnosis">{{ batchDiagnosisLoading ? '正在自动审核…' : '✦ 一键自动审核' }}</button>
+        <button class="ghost-action quality-action" :disabled="!selectedBatch" @click="openReviewQuality">自动审批抽查</button>
+        <button class="ghost-action audit-log-action" :disabled="!selectedBatch" @click="openBatchAudit">审核日志</button>
         <button class="ghost-action" :disabled="!selectedBatch" @click="reviewAll('rejected')">全部拒绝</button>
         <button class="ghost-action approve" :disabled="!selectedBatch" @click="reviewAll('approved')">全部通过</button>
         <button v-if="selectedBatch?.status === 'committed'" class="ghost-action reopen-batch-action" @click="reopenSelectedBatch">撤回到复核</button>
@@ -603,25 +954,174 @@ onMounted(async () => {
 
     <div v-if="selectedBatch?.error_message" class="batch-warning">{{ selectedBatch.error_message }}</div>
 
-    <div class="data-table-wrap review-scroll" v-loading="loading">
-      <table class="market-table">
-        <thead><tr><th>来源</th><th>品牌 / 型号</th><th>规格</th><th>颜色 / 版本</th><th>价格</th><th>置信度</th><th>状态</th><th></th></tr></thead>
-        <tbody>
-          <tr v-for="row in candidates" :key="row.id" :class="{ uncertain: row.confidence < 0.75 }">
-            <td><button class="source-link" type="button" @click.stop="viewSource(row)"><small>{{ row.sheet_name || '图片' }}</small><br><code>{{ row.cell_address || `L${row.id}` }}</code><b>{{ sourceActionLabel(row) }}</b></button></td>
-            <td><b>{{ row.brand }}</b><br><span>{{ row.model }}</span></td>
-            <td>{{ row.storage || '—' }}</td>
-            <td>{{ [row.color, row.variant].filter(Boolean).join(' · ') || '—' }}</td>
-            <td><strong v-if="row.price_status === 'quoted'">¥{{ row.price }}</strong><span v-else class="price-state">{{ priceStatusLabel(row.price_status) }}</span></td>
-            <td><span class="confidence"><i :style="{ width: `${row.confidence * 100}%` }"></i></span><small>{{ Math.round(row.confidence * 100) }}%</small></td>
-            <td><span :class="['review-badge', row.review_status]">{{ statusLabel(row.review_status) }}</span></td>
-            <td class="row-actions"><button @click="reviewOne(row, 'approved')">✓</button><button @click="reviewOne(row, 'rejected')">×</button><button @click="viewSource(row)">{{ sourceActionLabel(row) }}</button><button class="source-row-edit" @click="editSourceGroup(row)">{{ sourceGroupActionLabel(row) }}</button><button @click="edit(row)">单条</button><button class="delete-action" @click="deleteCandidate(row)">删除</button></td>
-          </tr>
-          <tr v-if="!candidates.length"><td colspan="8" class="empty-cell">当前筛选没有记录，调整条件后再试。</td></tr>
-        </tbody>
-      </table>
+    <div :class="['review-workspace', { diagnosing: diagnosisTarget || batchDiagnosis || batchDiagnosisLoading }]">
+      <div class="data-table-wrap review-scroll" v-loading="loading">
+        <table class="market-table">
+          <thead><tr><th class="diagnosis-entry-head">智能审核</th><th>来源</th><th>品牌 / 型号</th><th>规格</th><th>颜色 / 版本</th><th>价格</th><th>置信度</th><th>状态</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="row in candidates" :key="row.id" :class="{ uncertain: row.confidence < 0.75, diagnosed: diagnosisTarget?.id === row.id }">
+              <td class="diagnosis-entry-cell"><button class="diagnose-action" type="button" title="运行复核诊断智能体" @click="runDiagnosis(row)">✦ 智能审核</button></td>
+              <td><button class="source-link" type="button" @click.stop="viewSource(row)"><small>{{ row.sheet_name || '图片' }}</small><br><code>{{ row.cell_address || `L${row.id}` }}</code><b>{{ sourceActionLabel(row) }}</b></button></td>
+              <td><b>{{ row.brand }}</b><br><span>{{ row.model }}</span></td>
+              <td>{{ row.storage || '—' }}</td>
+              <td>{{ [row.color, row.variant].filter(Boolean).join(' · ') || '—' }}</td>
+              <td><strong v-if="row.price_status === 'quoted'">¥{{ row.price }}</strong><span v-else class="price-state">{{ priceStatusLabel(row.price_status) }}</span></td>
+              <td><span class="confidence"><i :style="{ width: `${row.confidence * 100}%` }"></i></span><small>{{ Math.round(row.confidence * 100) }}%</small></td>
+              <td><span :class="['review-badge', row.review_status, { automatic: isAutoApproved(row) }]">{{ isAutoApproved(row) ? '自动通过' : statusLabel(row.review_status) }}</span></td>
+              <td class="row-actions"><button v-if="isAutoApproved(row)" class="revoke-auto-action" @click="revokeAutoApproval(row)">撤销自动通过</button><template v-else><button @click="reviewOne(row, 'approved')">✓</button><button @click="reviewOne(row, 'rejected')">×</button></template><button @click="viewSource(row)">{{ sourceActionLabel(row) }}</button><button class="source-row-edit" @click="editSourceGroup(row)">{{ sourceGroupActionLabel(row) }}</button><button @click="edit(row)">单条</button><button class="audit-row-action" @click="openCandidateAudit(row)">记录</button><button class="delete-action" @click="deleteCandidate(row)">删除</button></td>
+            </tr>
+            <tr v-if="!candidates.length"><td colspan="9" class="empty-cell">当前筛选没有记录，调整条件后再试。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <aside v-if="diagnosisTarget" class="review-diagnosis-panel" v-loading="diagnosisLoading || diagnosisApplying">
+        <header>
+          <div><small>复核诊断智能体</small><strong>{{ diagnosisTargetLabel(diagnosisTarget) }}</strong><span>{{ diagnosis?.source_label || '正在读取来源和历史报价' }}</span></div>
+          <button type="button" :title="batchDiagnosis ? '返回批次审核结果' : '关闭诊断'" @click="closeDiagnosis">{{ batchDiagnosis ? '←' : '×' }}</button>
+        </header>
+        <div v-if="diagnosis" class="diagnosis-content">
+          <section :class="['diagnosis-summary', diagnosis.severity]">
+            <div><b>{{ diagnosisSeverityLabel(diagnosis.severity) }}</b><em>{{ diagnosis.agent_mode === 'tool_calling' ? `${diagnosis.model} 工具调用` : '规则安全兜底' }}</em></div>
+            <p>{{ diagnosis.summary }}</p>
+            <dl><div><dt>原始识别置信度</dt><dd>{{ Math.round(diagnosis.recognition_confidence * 100) }}%</dd></div><div><dt>确认状态</dt><dd>{{ diagnosis.verification_status === 'human_confirmed' ? '已人工确认' : '尚未确认' }}</dd></div></dl>
+          </section>
+
+          <section v-if="diagnosis.issue_types.length" class="diagnosis-issues">
+            <span v-for="item in diagnosis.issue_types" :key="item">{{ item }}</span>
+          </section>
+
+          <section class="diagnosis-block diagnosis-workflow">
+            <div class="diagnosis-workflow-title"><h3>智能体执行过程</h3><small>任务 {{ diagnosis.agent_run_id.slice(0, 8) }}</small></div>
+            <ol>
+              <li v-for="step in diagnosis.workflow_steps" :key="`${step.order}-${step.title}`" :class="step.status">
+                <i>{{ step.order }}</i>
+                <span><b>{{ step.title }}</b><small>{{ agentStepPhaseLabel(step.phase) }} · {{ step.status === 'fallback' ? '安全兜底' : '已完成' }}</small><p>{{ step.detail }}</p></span>
+              </li>
+            </ol>
+          </section>
+
+          <section class="diagnosis-block">
+            <h3>判断依据</h3>
+            <article v-for="item in diagnosis.evidence" :key="`${item.category}-${item.title}`" :class="item.severity">
+              <b>{{ item.title }}</b><p>{{ item.detail }}</p>
+            </article>
+          </section>
+
+          <section v-if="diagnosis.proposed_changes.length" class="diagnosis-block diagnosis-changes">
+            <h3>可确认采用的建议</h3>
+            <label v-for="item in diagnosis.proposed_changes" :key="item.field">
+              <input v-model="diagnosisFields" type="checkbox" :value="item.field" />
+              <span><b>{{ item.label }}</b><em>{{ diagnosisValue(item.current_value) }} → {{ diagnosisValue(item.suggested_value) }}</em><small>{{ item.reason }}</small></span>
+            </label>
+          </section>
+
+          <section class="diagnosis-block diagnosis-recommendations">
+            <h3>建议处理顺序</h3>
+            <ol><li v-for="item in diagnosis.recommendations" :key="item">{{ item }}</li></ol>
+          </section>
+        </div>
+        <div v-else class="diagnosis-loading-copy">正在比对来源原文、同一行记录和历史报价…</div>
+        <footer>
+          <button type="button" @click="viewSource(diagnosisTarget)">{{ sourceActionLabel(diagnosisTarget) }}</button>
+          <button type="button" @click="editSourceGroup(diagnosisTarget)">{{ isExcelCandidate(diagnosisTarget) ? '编辑单元格' : '整行修改' }}</button>
+          <button type="button" @click="edit(diagnosisTarget)">手动修改</button>
+          <button v-if="diagnosis?.proposed_changes.length" class="diagnosis-apply" type="button" :disabled="!diagnosisFields.length || diagnosisApplying" @click="applyDiagnosis">采用所选建议</button>
+          <button class="diagnosis-confirm" type="button" :disabled="!diagnosis || diagnosisApplying" @click="markDiagnosisNoIssue">确认无问题</button>
+        </footer>
+      </aside>
+
+      <aside v-else-if="batchDiagnosis || batchDiagnosisLoading" class="review-diagnosis-panel batch-diagnosis-panel" v-loading="batchDiagnosisApplying">
+        <header>
+          <div><small>复核诊断智能体</small><strong>一键智能审核结果</strong><span>{{ selectedBatch?.filename || '当前导入批次' }}</span></div>
+          <button type="button" title="关闭审核结果" @click="closeReviewAgent">×</button>
+        </header>
+        <div v-if="batchDiagnosis" class="diagnosis-content">
+          <section class="batch-diagnosis-intro">
+            <b>已完成 {{ batchDiagnosis.scanned_count }} 条安全审核</b>
+            <p>系统只自动通过置信度不低于90%且未发现结构、重复和价格风险的记录；其余记录保留给你审核。</p>
+          </section>
+          <section class="batch-diagnosis-metrics">
+            <div class="safe"><strong>{{ batchDiagnosis.safe_count }}</strong><span>未发现异常</span></div>
+            <div class="safe"><strong>{{ batchDiagnosis.auto_approved_count }}</strong><span>已自动通过</span></div>
+            <div class="warning"><strong>{{ batchDiagnosis.warning_count }}</strong><span>需重点核对</span></div>
+            <div class="danger"><strong>{{ batchDiagnosis.danger_count }}</strong><span>高风险</span></div>
+          </section>
+          <section v-if="Object.keys(batchDiagnosis.issue_counts).length" class="batch-issue-counts">
+            <span v-for="(count, label) in batchDiagnosis.issue_counts" :key="label">{{ label }} <b>{{ count }}</b></span>
+          </section>
+          <section class="diagnosis-block batch-risk-list">
+            <h3>需要你处理的记录 · {{ batchDiagnosis.risks.length }}</h3>
+            <button v-for="item in batchDiagnosis.risks" :key="item.candidate.id" type="button" @click="runDiagnosis(item.candidate)">
+              <i :class="item.severity"></i>
+              <span><b>{{ diagnosisTargetLabel(item.candidate) }}</b><small>{{ item.source_label }} · {{ item.summary }}</small></span>
+              <em>查看 ›</em>
+            </button>
+            <p v-if="!batchDiagnosis.risks.length" class="batch-no-risk">当前批次未发现需要重点处理的记录。</p>
+          </section>
+        </div>
+        <div v-else class="diagnosis-loading-copy">正在一次性比对当前批次的来源结构、重复报价和历史价格…</div>
+        <footer v-if="batchDiagnosis">
+          <button v-if="batchDiagnosis.pending_safe_count" class="diagnosis-apply" type="button" :disabled="selectedBatch?.status === 'committed' || batchDiagnosisApplying" @click="approveBatchSafeCandidates">补充通过安全项（{{ batchDiagnosis.pending_safe_count }}）</button>
+          <button type="button" :disabled="batchDiagnosisLoading" @click="runBatchDiagnosis">重新扫描</button>
+        </footer>
+      </aside>
     </div>
     <el-pagination v-if="total > 100" v-model:current-page="page" :page-size="100" :total="total" layout="prev, pager, next, total" />
+
+    <el-dialog v-model="auditDialogOpen" :title="auditTarget ? `操作记录 · ${diagnosisTargetLabel(auditTarget)}` : '批次审核日志'" width="min(860px, 94vw)" class="audit-log-dialog">
+      <div class="audit-log-toolbar">
+        <span>{{ auditTarget ? '当前报价的全部审核与修改记录' : selectedBatch?.filename }}</span>
+        <select v-if="!auditTarget" v-model="auditActionType" @change="loadAuditLogs">
+          <option value="">全部操作</option>
+          <option v-for="item in auditActionOptions" :key="item[0]" :value="item[0]">{{ item[1] }}</option>
+        </select>
+      </div>
+      <div v-loading="auditLoading" class="audit-log-list">
+        <article v-for="log in auditLogs" :key="log.id" class="audit-log-item">
+          <i></i>
+          <div class="audit-log-card">
+            <header><strong>{{ auditActionLabel(log.action_type) }}</strong><span>{{ auditTime(log.created_at) }} · {{ auditOperatorLabel(log.operator_type) }}</span></header>
+            <p v-if="log.reason">{{ log.reason }}</p>
+            <dl v-if="log.changed_fields.length">
+              <div v-for="field in log.changed_fields" :key="field">
+                <dt>{{ auditFieldLabel(field) }}</dt><dd><del>{{ auditValue(log, field, 'before_data') }}</del><b>→</b><ins>{{ auditValue(log, field, 'after_data') }}</ins></dd>
+              </div>
+            </dl>
+            <footer v-if="log.agent_run_id || log.model_name || log.rule_version">
+              <span v-if="log.agent_run_id">任务 {{ log.agent_run_id.slice(0, 8) }}</span>
+              <span v-if="log.model_name">{{ log.model_name }}</span>
+              <span v-if="log.rule_version">{{ log.rule_version }}</span>
+            </footer>
+          </div>
+        </article>
+        <p v-if="!auditLoading && !auditLogs.length" class="audit-log-empty">还没有审核操作记录；之后的自动审核、人工复核和修改都会显示在这里。</p>
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="qualityDialogOpen" title="自动审批抽查与质量统计" width="min(980px, 95vw)" class="review-quality-dialog">
+      <div v-loading="qualityLoading" class="review-quality-body">
+        <section v-if="qualityStats" class="quality-metrics">
+          <article><small>累计自动通过</small><strong>{{ qualityStats.auto_approved_total }}</strong><span>当前仍有效 {{ qualityStats.currently_auto_approved }}</span></article>
+          <article><small>抽查覆盖率</small><strong>{{ qualityStats.sample_coverage_percent }}%</strong><span>已抽取 {{ qualityStats.sampled_total }} 条</span></article>
+          <article class="quality-good"><small>已验证准确率</small><strong>{{ qualityStats.verified_accuracy_percent === null ? '—' : `${qualityStats.verified_accuracy_percent}%` }}</strong><span>正确 {{ qualityStats.sampled_passed }} · 错误 {{ qualityStats.sampled_failed }}</span></article>
+          <article class="quality-warn"><small>等待抽查</small><strong>{{ qualityStats.sampled_pending }}</strong><span>累计撤销 {{ qualityStats.revoked_total }}</span></article>
+        </section>
+        <div class="quality-toolbar">
+          <div><strong>抽查队列</strong><small>默认从尚未抽查的自动通过记录中随机抽取 10%，至少 1 条、最多 30 条。</small></div>
+          <button class="primary-action compact" :disabled="selectedBatch?.status === 'committed' || qualityLoading" @click="generateSamples">随机生成抽查</button>
+        </div>
+        <div class="quality-sample-list">
+          <article v-for="sample in reviewSamples" :key="sample.id" :class="`sample-${sample.status}`">
+            <i></i>
+            <div class="sample-main"><strong>{{ diagnosisTargetLabel(sample.candidate) }}</strong><span>{{ sample.candidate.sheet_name || '图片' }} · {{ sample.candidate.cell_address || `L${sample.candidate.id}` }} · 置信度 {{ Math.round(sample.candidate.confidence * 100) }}%</span><small v-if="sample.note">{{ sample.note }}</small></div>
+            <em>{{ sample.status === 'pending' ? '待核对' : sample.status === 'passed' ? '抽查正确' : '发现问题' }}</em>
+            <div class="sample-actions"><button @click="viewSource(sample.candidate)">{{ sourceActionLabel(sample.candidate) }}</button><template v-if="sample.status === 'pending'"><button class="sample-pass" @click="decideSample(sample, 'passed')">确认正确</button><button class="sample-fail" @click="decideSample(sample, 'failed')">发现问题</button></template></div>
+          </article>
+          <p v-if="!qualityLoading && !reviewSamples.length" class="audit-log-empty">还没有抽查记录。先执行一键自动审核，再随机生成抽查。</p>
+        </div>
+      </div>
+    </el-dialog>
 
     <el-dialog v-model="dialogOpen" title="修正识别字段" width="680px">
       <div class="edit-grid">

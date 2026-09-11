@@ -1,62 +1,154 @@
-# PriceRadar · 3C 回收行情助手
+# PriceRadar · 3C 数码回收行情智能体
 
-第一版已经跑通「Excel / 图片导入 → 清洗与结构化 → 人工复核 → 发布入库 → 同型号历史与涨跌统计」闭环。当前生产库保留了用户上传的思物通讯报价表作为待复核批次，确认后才会写入正式价格历史。
+PriceRadar 是一个面向 3C 数码回收报价的本地智能处理系统，覆盖「Excel / 图片导入 → 结构化清洗 → 智能与人工复核 → 发布入库 → 行情监控 → 异常处置 → 行情问答」完整闭环。
 
-## 当前状态
+系统默认使用本地 Ollama 与 `qwen2.5:7b`，不依赖付费大模型 API。价格计算、异常检测和数据修改由确定性程序完成，大模型负责理解问题、调用工具、归纳证据和生成建议，避免直接猜测报价。
 
-- 生产数据库：MySQL `price_radar`
-- 本机 Python 环境：`D:\anaconda3\envs\price-radar`
-- 已导入草稿：批次 `#1`，2093 条候选，状态 `review`
-- Excel：直接解析工作簿，按工作表识别报价日期、品类和品牌
-- 图片：支持一次上传多张；每张图片独立建档，使用本地 OpenCV 表格定位 + RapidOCR 识别，不需要 API Key，并自动判断 VIVO、OPPO、红米小米等板块
-- 无报价：`no_quote`；星号遮挡：`masked`；两类记录都会保留，但不参与涨跌统计
-- 涨跌口径：当前明确报价与此前最近一条明确报价比较
+## 已实现功能
 
-## 架构
+### 1. 数据来源导入智能体
+
+- 支持 Excel、PNG、JPG、JPEG、WEBP，单次最多选择 30 个文件。
+- Excel 优先直接读取工作簿单元格，不经过 OCR，适合作为主要数据来源。
+- Excel 入库前预检：区分可直接复核、重点检查、重复报价、异常波动和信息不完整。
+- 图片使用 OpenCV 表格定位与 RapidOCR 本地识别，不需要 API Key。
+- 每张图片独立处理，自动读取标题、报价日期和所属板块。
+- 后台任务逐文件处理，前端显示真实进度、当前文件、成功与失败状态，并支持失败重试。
+- 导入完成后由本地模型生成本次数据质量总结和处理建议。
+- 支持人工粘贴识别文本作为图片 OCR 的回退方式。
+
+### 2. 数据清洗与结构化
+
+- 拆分品牌、型号、容量、颜色、版本、价格状态和价格。
+- 统一 OnePlus / 一加等常见品牌表达，规范型号和容量格式。
+- 一行包含多个颜色价格时拆成多条候选记录，同时保留来源行关系。
+- `no_quote` 表示暂无报价；`masked` 表示价格含通配数字，两类都保留但不参与精确涨跌计算。
+- `*`、`x` 等通配符按“一符一位未知数字”处理，例如 `13**` 表示 `1300–1399` 范围，不会被保存成 13 元。
+- 保留 Excel 单元格地址或图片坐标，用于后续来源核对。
+
+### 3. 复核诊断智能体
+
+- 单条智能诊断：综合识别置信度、字段完整性、重复情况、历史报价和来源原文判断风险。
+- 展示诊断步骤、证据、风险等级、原因和修改建议。
+- 建议必须经人工确认后才能写入，不会由模型直接修改数据。
+- 支持整行 / 整个单元格编辑，可增加或删除同一型号下的颜色价格。
+- 支持单条通过、拒绝、编辑、删除以及查看来源。
+- Excel 显示原始单元格；图片显示原图并定位识别区域。
+- 支持修改批次报价日期、重新打开已发布批次进行检查。
+
+### 4. 一键自动审核与质量控制
+
+- 一键扫描整个批次，只自动通过高置信、结构完整且未发现明显风险的记录。
+- 风险记录继续保留给人工复核，并给出处理建议。
+- 已自动通过的记录可以单独撤销，退回待复核状态。
+- 自动审批抽查：从自动通过记录中随机抽取样本进行人工质量检查。
+- 抽查发现错误时自动撤销该记录的自动通过状态。
+- 统计自动通过数量、抽查覆盖率、抽查正确率、待抽查数量和累计撤销数量。
+
+### 5. 审核操作日志
+
+- 记录人工通过、拒绝、编辑、智能体建议采用、自动审批、撤销、抽查和行情异常修正。
+- 保存修改前数据、修改后数据、变更字段、操作来源、智能体运行编号和模型名称。
+- 支持查看单条记录日志，也支持按批次和操作类型筛选。
+
+### 6. 行情发布与历史
+
+- 只有完成复核的候选数据才能发布为正式报价。
+- 同一候选不会重复发布。
+- 报价历史支持分页、品牌筛选和型号搜索。
+- 涨跌口径为当前明确报价与此前最近一条相同规格明确报价比较。
+- 市场概览展示总体行情、品牌分类、涨跌数量和重点波动。
+- 支持删除未发布批次；危险的全量清空功能需要输入确认文字。
+
+### 7. 行情智能问答
+
+- 使用 Ollama `qwen2.5:7b` 理解自然语言问题并选择数据库查询工具。
+- 支持查询最新价格、历史价格、涨跌排行、品牌行情和异常波动。
+- 回答附带数据来源，只基于已发布报价；数据不足时明确说明，不编造数字。
+- 对话和消息持久化到 MySQL，刷新页面或重启项目后仍然保留。
+- 每个对话拥有独立记忆，可保存品牌、型号、容量、颜色和上次问题。
+- 支持上下文追问，例如先问“红米 K80 最新价”，再问“它和上一期比怎么样”。
+
+### 8. 行情监控智能体
+
+- 可手动运行，也会在新报价发布后自动运行。
+- 自动比较最新报价日与上一报价日。
+- 检测价格异常、报价数量骤减、型号新增、型号消失、容量倒挂和颜色价差。
+- 按高风险、需关注和信息分级，支持按处置状态、风险和类型筛选。
+- 本地模型根据检测证据生成行情简报，不改变程序计算出的数字。
+- 保存每次运行记录；修正异常后自动执行一次复检。
+
+### 9. 异常处置智能体
+
+- 从监控异常回查当前报价、上一期价格、来源原文、原始位置和候选记录。
+- 状态包括待诊断、待确认、已修正和已忽略。
+- 普通大幅波动只给核对建议，不强行推测正确价格。
+- 对有充分证据的明显漏位问题可提出建议价格，但必须人工确认。
+- 对 `46xx`、`13**` 等通配价格建议恢复为“价格区间 / 掩码”，不会用上一期价格冒充精确值。
+- 人工采用建议后同步更新正式报价与原候选记录、写入审核日志并启动行情复检。
+- 对确认属于真实行情的波动，可以标记为无需处理。
+
+## 智能体工作流
 
 ```mermaid
 flowchart LR
-    A[Excel / 报价图片] --> B[ImportBatch 导入批次]
-    B --> C[解析器与规范化器]
+    A[Excel / 报价图片] --> B[数据来源导入智能体]
+    B --> C[清洗与结构化]
     C --> D[QuoteCandidate 候选报价]
-    D --> E[人工复核工作台]
-    E -->|通过并发布| F[PriceQuote 正式历史]
-    F --> G[涨跌统计 API]
-    F --> H[型号价格历史]
-    G --> I[Vue 行情台]
-    H --> I
+    D --> E[复核诊断智能体]
+    E --> F{人工确认或安全自动通过}
+    F --> G[PriceQuote 正式历史]
+    G --> H[行情监控智能体]
+    H --> I[异常处置智能体]
+    I -->|人工确认修正| G
+    G --> J[行情问答智能体]
+    J --> K[带来源的回答与会话记忆]
 ```
 
-代码按层拆分，后续增加新的报价来源、品牌规则、通知、定时任务或其他 3C 品类时，不需要改写整套系统：
+这里的智能体不是单纯聊天界面：模型需要读取上下文、选择业务工具、获得数据库证据、形成判断，并在人工授权范围内触发下一步工作流。所有高风险写操作仍由程序校验和人工确认控制。
 
-- `frontend/`：Vue 3、TypeScript、Vite、Pinia、Element Plus、ECharts
-- `backend/app/api/`：FastAPI 路由，只处理 HTTP 输入输出
-- `backend/app/services/`：Excel、OCR、解析、发布、涨跌计算等业务逻辑
+## 技术栈与代码结构
+
+- 前端：Vue 3、TypeScript、Vite、Pinia、Element Plus、ECharts
+- 后端：Python 3.12、FastAPI、Pydantic、SQLAlchemy、Alembic
+- 数据库：MySQL 8、PyMySQL
+- Excel：openpyxl
+- 图片识别：OpenCV、RapidOCR、ONNX Runtime
+- 本地大模型：Ollama、Qwen2.5 7B
+- 测试：pytest、Playwright CLI
+
+主要目录：
+
+- `frontend/src/views/`：智能问答、监控、概览、导入、复核和历史页面
+- `backend/app/api/routes/`：FastAPI 接口层
+- `backend/app/services/`：导入、解析、审核、行情、智能体和异常处置逻辑
 - `backend/app/models/`：SQLAlchemy 数据模型
-- `backend/alembic/`：MySQL 结构迁移
-- `backend/tests/` 与 `backend/scripts/e2e_smoke.py`：解析和全链路回归
+- `backend/alembic/`：MySQL 数据库迁移
+- `backend/tests/`：解析、后台任务、智能体、审核质量和行情监控测试
+- `scripts/`：Windows 本地启动脚本
 
-更详细的字段与扩展边界见 [架构说明](docs/ARCHITECTURE.md)。
+详细设计见 [架构说明](docs/ARCHITECTURE.md)。
 
-## 本机启动
+## 本机要求
 
-MySQL 服务启动且 `backend/.env` 已配置后，在项目根目录运行：
+- Windows 10 / 11
+- MySQL 8
+- Python 3.12（项目默认环境为 `D:\anaconda3\envs\price-radar`）
+- Node.js 与 npm
+- Ollama 与本地模型 `qwen2.5:7b`
+
+确认模型：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run-dev.ps1
+ollama list
+ollama pull qwen2.5:7b
 ```
 
-Windows 下也可以直接双击项目根目录的 `start.bat`。
-
-启动地址：
-
-- 前端：http://127.0.0.1:5173
-- 后端接口文档：http://127.0.0.1:8000/docs
-- 健康检查：http://127.0.0.1:8000/health
-
-脚本会返回两个进程 ID，可用输出中的 `Stop-Process` 命令停止。
+OCR 和 Excel 解析不依赖 Ollama；Ollama 不可用时，导入、复核、发布和确定性监控仍可运行，但模型总结与自然语言问答会受限。
 
 ## 从零配置
+
+后端：
 
 ```powershell
 conda create --prefix D:\anaconda3\envs\price-radar python=3.12 -y
@@ -64,69 +156,98 @@ conda activate D:\anaconda3\envs\price-radar
 pip install -r .\backend\requirements.txt
 
 Copy-Item .\backend\.env.example .\backend\.env
-# 编辑 backend/.env，填写 DATABASE_URL
-
-Set-Location .\backend
-alembic upgrade head
-
-Set-Location ..\frontend
-npm install
-npm run build
+# 编辑 backend/.env，设置 DATABASE_URL
 ```
 
-首次使用 MySQL 时先创建数据库：
+首次创建数据库：
 
 ```sql
 CREATE DATABASE price_radar CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 ```
 
-真实密码仅放在被 Git 忽略的 `backend/.env` 中；`.env.example` 和 Alembic 配置不保存密码。
+执行迁移：
 
-## 使用流程
+```powershell
+Set-Location .\backend
+alembic upgrade head
+Set-Location ..
+```
 
-1. 在「数据导入」一次选择多张报价图片或 Excel 文件并上传。
-2. Excel 会直接生成候选；图片使用本地 RapidOCR 自动识别，无需 API Key。每张图片根据 OCR 文字自动判断所属板块，并独立生成一个复核批次。
-3. 在「复核工作台」查看原文、来源单元格、置信度、型号、规格、颜色、价格状态和价格。
-4. 逐条修正或批量通过/拒绝。
-5. 点击「发布报价」后写入正式历史。
-6. 第二期同型号报价发布后，在市场概览和报价历史中查看涨跌额、涨跌幅与趋势。
+前端：
 
-系统不会把“没有价格”强行补成 0，也不会在上传后自动发布，避免错误数据污染价格历史。
+```powershell
+Set-Location .\frontend
+npm install
+npm run build
+Set-Location ..
+```
+
+真实密码只放在被 Git 忽略的 `backend/.env` 中，不要提交到仓库。
+
+## 一键启动和关闭
+
+确保 MySQL 和 Ollama 已启动，然后双击根目录的 `start.bat`，或者运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-dev.ps1
+```
+
+访问地址：
+
+- 前端：http://127.0.0.1:5173
+- 后端接口文档：http://127.0.0.1:8000/docs
+- 健康检查：http://127.0.0.1:8000/health
+
+启动脚本会输出前后端进程 ID，并给出对应的 `Stop-Process` 关闭命令。关闭启动脚本窗口不一定会结束子进程，应优先使用脚本输出的命令。
+
+## 推荐使用流程
+
+1. 在“数据来源导入智能体”中上传 Excel；只有没有表格时再上传图片。
+2. 查看 Excel 入库前检查，选择全部进入复核或只导入正常记录。
+3. 在“复核工作台”先运行一键自动审核，再处理剩余风险记录。
+4. 对自动通过记录进行随机抽查，确认当前自动审核质量。
+5. 完成复核后发布报价。
+6. 在“行情监控智能体”查看发布后自动生成的监控报告。
+7. 对异常运行智能诊断，核对来源后决定采用建议或确认无需处理。
+8. 在“行情智能问答”中查询报价、涨跌和异常原因。
 
 ## 主要接口
 
-- `POST /api/v1/imports`：上传 Excel 或图片
-- `POST /api/v1/imports/bulk`：批量上传（单次最多 30 个文件）
-- `GET /api/v1/imports/{id}/candidates`：分页查看识别候选
-- `PATCH /api/v1/imports/candidates/{candidate_id}`：人工修正
-- `POST /api/v1/imports/{id}/review-all`：批量复核
-- `POST /api/v1/imports/{id}/reparse-image`：用人工文本重解析图片
-- `POST /api/v1/imports/{id}/reparse-excel`：安全重解析尚未人工处理的 Excel 草稿
-- `POST /api/v1/imports/{id}/commit`：发布正式报价
-- `GET /api/v1/quotes/changes`：涨跌列表
-- `GET /api/v1/quotes/{model_key}/history`：型号历史
-- `GET /api/v1/dashboard/summary`：行情概览
+| 模块 | 接口 | 说明 |
+| --- | --- | --- |
+| 导入任务 | `POST /api/v1/imports/tasks` | 创建后台批量导入任务 |
+| 导入任务 | `GET /api/v1/imports/tasks/{task_id}` | 获取真实处理进度 |
+| Excel 预检 | `POST /api/v1/imports/precheck-excel` | 入库前检查 Excel |
+| 候选复核 | `GET /api/v1/imports/{batch_id}/candidates` | 分页筛选候选记录 |
+| 候选编辑 | `PATCH /api/v1/imports/candidates/{candidate_id}` | 修改单条候选记录 |
+| 发布报价 | `POST /api/v1/imports/{batch_id}/commit` | 写入正式历史并触发监控 |
+| 智能问答 | `POST /api/v1/agent/chat` | 带工具调用与会话记忆的行情问答 |
+| 单条诊断 | `POST /api/v1/agent/review-diagnose/{candidate_id}` | 诊断复核记录 |
+| 一键审核 | `POST /api/v1/agent/review-diagnose/batches/{batch_id}` | 批次风险扫描 |
+| 行情监控 | `POST /api/v1/monitor/runs` | 手动启动行情监控 |
+| 异常诊断 | `POST /api/v1/monitor/findings/{finding_id}/diagnose` | 生成证据与处置建议 |
+| 异常执行 | `POST /api/v1/monitor/findings/{finding_id}/apply` | 人工确认后执行建议 |
+| 涨跌列表 | `GET /api/v1/quotes/changes` | 查询当前与上一期涨跌 |
+| 型号历史 | `GET /api/v1/quotes/{model_key}/history` | 查询相同规格历史价格 |
+
+完整接口及请求结构以启动后的 Swagger 文档为准。
 
 ## 验证
 
 ```powershell
-$env:PYTHONNOUSERSITE='1'
 Set-Location .\backend
-& 'D:\anaconda3\envs\price-radar\python.exe' -s .\scripts\e2e_smoke.py 'D:\path\to\报价表.xlsx'
+& 'D:\anaconda3\envs\price-radar\python.exe' -s -m pytest -q
 
 Set-Location ..\frontend
 npm run build
 ```
 
-E2E 使用独立数据库 `price_radar_test_e2e`，会验证真实 Excel 导入、图片文本回退、无报价/遮挡价格、发布、历史和涨跌幅，不会清空生产数据库。
+当前测试覆盖解析器、Excel 预检、图片表格识别、后台导入任务、会话记忆、复核智能体、自动审批、抽查质量、审核日志、行情监控和异常处置。
 
-## 下一阶段建议
+## 安全边界
 
-第一版不需要 LangChain 或向量数据库；这里的核心是稳定的数据管道和审核状态机。等数据量和来源增加后，再按需要加入：
-
-- Redis + RQ/Celery：异步 OCR、批量导入和任务重试
-- S3/MinIO：原始报价图片与表格归档
-- APScheduler/Celery Beat：定时抓取或提醒上传
-- 规则版本、别名字典和回归样本库：持续提高型号归一化
-- 用户、角色和审核日志：多人协作
-- Docker Compose：部署到服务器时统一 MySQL、API、Web 与 Redis
+- 上传后不会自动发布，候选数据必须完成复核。
+- 大模型不直接生成或覆盖报价，关键修改必须通过业务校验并由人工确认。
+- `no_quote` 和 `masked` 不按 0 元参与涨跌统计。
+- 删除全部数据需要明确的二次确认文字。
+- 数据库密码、上传文件、构建产物和本地测试状态均由 `.gitignore` 排除。

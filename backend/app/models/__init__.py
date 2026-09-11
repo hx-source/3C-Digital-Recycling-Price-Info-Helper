@@ -1,4 +1,3 @@
-from app.models.entities import ImportBatch, PriceQuote, QuoteCandidate
+from app.models.entities import AgentConversation, AgentConversationMessage, ImportBatch, ImportTask, ImportTaskItem, MarketMonitorFinding, MarketMonitorRun, PriceQuote, QuoteCandidate, ReviewAuditLog, ReviewSample
 
-__all__ = ["ImportBatch", "PriceQuote", "QuoteCandidate"]
-
+__all__ = ["AgentConversation", "AgentConversationMessage", "ImportBatch", "ImportTask", "ImportTaskItem", "MarketMonitorFinding", "MarketMonitorRun", "PriceQuote", "QuoteCandidate", "ReviewAuditLog", "ReviewSample"]

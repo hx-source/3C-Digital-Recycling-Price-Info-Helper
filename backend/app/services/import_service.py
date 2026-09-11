@@ -4,6 +4,7 @@ import hashlib
 import shutil
 from datetime import date, datetime
 from pathlib import Path
+from collections.abc import Callable
 from uuid import uuid4
 
 from fastapi import UploadFile
@@ -107,12 +108,33 @@ def create_import(
 ) -> ImportBatch:
     if excel_import_mode not in {"all", "normal_only"}:
         raise ValueError("Excel 导入方式不正确")
-    source_type = detect_source_type(upload.filename or "")
     path, sha256 = save_upload(upload)
+    return create_import_from_saved(
+        db, path, upload.filename or path.name, sha256, source_name, requested_date,
+        manual_text, image_sheet_name, excel_import_mode,
+    )
+
+
+def create_import_from_saved(
+    db: Session,
+    path: Path,
+    filename: str,
+    sha256: str,
+    source_name: str,
+    requested_date: date | None,
+    manual_text: str | None,
+    image_sheet_name: str | None,
+    excel_import_mode: str = "all",
+    progress_callback: Callable[[str, int], None] | None = None,
+) -> ImportBatch:
+    """Parse one already persisted upload, reporting completed processing stages."""
+    if excel_import_mode not in {"all", "normal_only"}:
+        raise ValueError("Excel 导入方式不正确")
+    source_type = detect_source_type(filename)
     batch = ImportBatch(
         source_type=source_type,
         source_name=source_name,
-        filename=upload.filename or path.name,
+        filename=filename,
         stored_path=str(path),
         file_sha256=sha256,
         status=BatchStatus.PARSING,
@@ -120,6 +142,8 @@ def create_import(
     )
     db.add(batch)
     db.flush()
+    if progress_callback:
+        progress_callback("parsing", 20)
 
     fallback_date = requested_date or date.today()
     try:
@@ -131,6 +155,8 @@ def create_import(
         else:
             provider = ManualTextOcrProvider(manual_text) if manual_text else RapidOcrTableProvider()
             items = provider.recognize(path, fallback_date, image_sheet_name)
+        if progress_callback:
+            progress_callback("persisting", 85)
         _persist_candidates(db, batch, items)
     except OcrConfigurationError as exc:
         batch.status = BatchStatus.NEEDS_OCR
@@ -140,6 +166,8 @@ def create_import(
         batch.error_message = f"{type(exc).__name__}: {exc}"
     db.commit()
     db.refresh(batch)
+    if progress_callback:
+        progress_callback("completed" if batch.status == BatchStatus.REVIEW else "failed", 100)
     return batch
 
 

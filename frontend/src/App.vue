@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { useMarketStore } from './stores/market'
 
-type ViewName = 'agent' | 'dashboard' | 'import' | 'review' | 'quotes'
+type ViewName = 'agent' | 'monitor' | 'dashboard' | 'import' | 'review' | 'quotes'
 
 const active = ref<ViewName>('agent')
 const market = useMarketStore()
@@ -10,6 +10,7 @@ const contentViewport = ref<HTMLElement | null>(null)
 
 const views = {
   agent: defineAsyncComponent(() => import('./views/AgentView.vue')),
+  monitor: defineAsyncComponent(() => import('./views/MonitorView.vue')),
   dashboard: defineAsyncComponent(() => import('./views/DashboardView.vue')),
   import: defineAsyncComponent(() => import('./views/ImportView.vue')),
   review: defineAsyncComponent(() => import('./views/ReviewView.vue')),
@@ -18,6 +19,7 @@ const views = {
 const activeComponent = computed(() => views[active.value])
 const viewTitle = computed(() => ({
   agent: '行情智能体',
+  monitor: '行情监控智能体',
   dashboard: '市场概览',
   import: '数据来源导入智能体',
   review: '复核工作台',
@@ -26,6 +28,7 @@ const viewTitle = computed(() => ({
 
 const navItems: Array<{ key: ViewName; label: string; mark: string }> = [
   { key: 'agent', label: '智能问答', mark: '✦' },
+  { key: 'monitor', label: '行情监控', mark: '◎' },
   { key: 'dashboard', label: '市场概览', mark: '◫' },
   { key: 'import', label: '来源导入', mark: '↥' },
   { key: 'review', label: '复核工作台', mark: '✓' },

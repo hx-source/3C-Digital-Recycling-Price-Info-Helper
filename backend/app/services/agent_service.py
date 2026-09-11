@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -250,12 +251,52 @@ def _ollama_chat(payload: dict[str, Any]) -> dict[str, Any]:
         raise AgentUnavailableError("本机 Ollama 未启动或模型暂时不可用") from error
 
 
-def ask_market_agent(db: Session, request: AgentChatRequest) -> tuple[str, list[AgentSource], list[str]]:
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+def _arguments_with_memory(arguments: dict[str, Any], memory: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(arguments)
+    if not _text(resolved.get("brand")) and memory.get("brand"):
+        resolved["brand"] = memory["brand"]
+    if not _text(resolved.get("query")):
+        parts = [memory.get("model"), memory.get("storage"), memory.get("color")]
+        resolved["query"] = " ".join(_text(part) for part in parts if _text(part))
+    return resolved
+
+
+def _updated_memory(memory: dict[str, Any], question: str, tool_arguments: list[dict[str, Any]]) -> dict[str, Any]:
+    output = dict(memory)
+    for arguments in tool_arguments:
+        brand = _text(arguments.get("brand"))
+        query = _text(arguments.get("query"))
+        if brand:
+            output["brand"] = brand
+        if query:
+            storage = re.search(r"\b\d{1,2}\s*\+\s*(?:\d{2,4}|1\s*[Tt])\b", query, re.I)
+            if storage:
+                output["storage"] = re.sub(r"\s+", "", storage.group(0)).upper()
+            model = re.sub(r"\b\d{1,2}\s*\+\s*(?:\d{2,4}|1\s*[Tt])\b", "", query, flags=re.I).strip()
+            if model:
+                output["model"] = model
+    for brand in ("华为", "荣耀", "苹果", "小米", "红米", "OPPO", "vivo", "一加", "真我", "三星"):
+        if brand.lower() in question.lower():
+            output["brand"] = brand
+            break
+    output["last_question"] = question[:500]
+    return {key: value for key, value in output.items() if value not in (None, "")}
+
+
+def ask_market_agent(
+    db: Session, request: AgentChatRequest, memory: dict[str, Any] | None = None
+) -> tuple[str, list[AgentSource], list[str], dict[str, Any]]:
+    active_memory = dict(memory or {})
+    memory_prompt = json.dumps(active_memory, ensure_ascii=False) if active_memory else "暂无"
+    messages: list[dict[str, Any]] = [{
+        "role": "system",
+        "content": SYSTEM_PROMPT + f"\n当前会话结构化记忆：{memory_prompt}。遇到‘它、这个型号、和昨天比’等指代时继承记忆条件；本轮明确给出新条件时覆盖旧条件。",
+    }]
     messages.extend({"role": item.role, "content": item.content} for item in request.history[-10:])
     messages.append({"role": "user", "content": request.question})
     sources: list[AgentSource] = []
     tools_used: list[str] = []
+    used_arguments: list[dict[str, Any]] = []
 
     for _ in range(4):
         response = _ollama_chat(
@@ -274,7 +315,7 @@ def ask_market_agent(db: Session, request: AgentChatRequest) -> tuple[str, list[
             answer = _text(message.get("content"))
             if answer:
                 unique_sources = list({(item.label, item.detail): item for item in sources}.values())
-                return answer, unique_sources[:5], tools_used
+                return answer, unique_sources[:5], tools_used, _updated_memory(active_memory, request.question, used_arguments)
             break
 
         messages.append(message)
@@ -284,6 +325,8 @@ def ask_market_agent(db: Session, request: AgentChatRequest) -> tuple[str, list[
             arguments = function.get("arguments") or {}
             if not isinstance(arguments, dict):
                 arguments = {}
+            arguments = _arguments_with_memory(arguments, active_memory)
+            used_arguments.append(arguments)
             result = _execute_tool(db, name, arguments)
             sources.extend(result.sources)
             if name and name not in tools_used:

@@ -1,62 +1,29 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { apiClient, errorMessage } from '../api'
 import { useMarketStore } from '../stores/market'
-import type { AgentSource } from '../types'
+import type { AgentConversation, AgentConversationMessage, AgentSource } from '../types'
 
 type ChatRole = 'user' | 'assistant'
 interface ChatMessage {
-  id: string
+  id: string | number
   role: ChatRole
   content: string
   sources?: AgentSource[]
   isGreeting?: boolean
 }
-interface Conversation {
-  id: string
-  title: string
-  updatedAt: number
-  messages: ChatMessage[]
-}
-
-const STORAGE_KEY = 'price-radar-agent-conversations-v1'
 const market = useMarketStore()
 const question = ref('')
 const asking = ref(false)
 const conversation = ref<HTMLElement | null>(null)
 
-function createId() {
-  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function createConversation(): Conversation {
-  return {
-    id: createId(),
-    title: '新行情问答',
-    updatedAt: Date.now(),
-    messages: [{
-      id: createId(),
-      role: 'assistant',
-      isGreeting: true,
-      content: '我是你的行情问答助手。你可以直接问某个型号的价格、今天哪些机型涨跌最多，或查看异常波动。我会先查询已发布报价，再给你答案。',
-    }],
-  }
-}
-
-function loadConversations(): Conversation[] {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
-    if (Array.isArray(saved) && saved.length) return saved as Conversation[]
-  } catch {
-    // 保存记录损坏时自动新建，不影响行情问答。
-  }
-  return [createConversation()]
-}
-
-const conversations = ref<Conversation[]>(loadConversations())
-const activeConversationId = ref(conversations.value[0].id)
-const activeConversation = computed(() => conversations.value.find(item => item.id === activeConversationId.value) || conversations.value[0])
-const messages = computed(() => activeConversation.value.messages)
+const emptyConversation: AgentConversation = { id: '', title: '新行情问答', memory: {}, created_at: '', updated_at: '', messages: [] }
+const conversations = ref<AgentConversation[]>([])
+const activeConversationId = ref('')
+const activeConversation = computed(() => conversations.value.find(item => item.id === activeConversationId.value) || conversations.value[0] || emptyConversation)
+const greeting: AgentConversationMessage = { id: -1, role: 'assistant', content: '我是你的行情问答助手。我会记住当前对话中的品牌、型号、容量和日期条件，你可以继续问“它和昨天比怎么样”。', sources: null, tools_used: null, created_at: '' }
+const messages = computed(() => activeConversation.value.messages.length ? activeConversation.value.messages : [greeting])
 const suggestedQuestions = [
   '今天整体行情怎么样？',
   '今天跌得最多的 5 个型号有哪些？',
@@ -64,33 +31,17 @@ const suggestedQuestions = [
   '查一下红米 K80 的最新报价',
 ]
 
-const history = computed(() => messages.value
-  .filter(message => !message.isGreeting)
-  .slice(-10)
-  .map(message => ({ role: message.role, content: message.content })))
-
-function persist() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(conversations.value.slice(0, 30)))
-}
-
-function touchCurrent() {
-  activeConversation.value.updatedAt = Date.now()
-  conversations.value.sort((a, b) => b.updatedAt - a.updatedAt)
-  persist()
-}
-
 function appendMessage(message: Omit<ChatMessage, 'id'>) {
-  activeConversation.value.messages.push({ id: createId(), ...message })
-  touchCurrent()
+  activeConversation.value.messages.push({ id: Date.now() + Math.random(), ...message } as AgentConversationMessage)
+  activeConversation.value.updated_at = new Date().toISOString()
 }
 
-function newConversation() {
+async function newConversation() {
   if (asking.value) return
-  const item = createConversation()
+  const item = await apiClient.createAgentConversation()
   conversations.value.unshift(item)
   activeConversationId.value = item.id
   question.value = ''
-  persist()
   scrollToBottom()
 }
 
@@ -100,20 +51,24 @@ function selectConversation(id: string) {
   scrollToBottom()
 }
 
-function removeConversation(id: string) {
+async function removeConversation(id: string) {
   if (asking.value) return
+  try {
+    await apiClient.deleteAgentConversation(id)
+  } catch (error) {
+    return void ElMessage.error(errorMessage(error))
+  }
   conversations.value = conversations.value.filter(item => item.id !== id)
-  if (!conversations.value.length) conversations.value = [createConversation()]
-  if (activeConversationId.value === id) activeConversationId.value = conversations.value[0].id
-  persist()
+  if (!conversations.value.length) await newConversation()
+  if (activeConversationId.value === id) activeConversationId.value = conversations.value[0]?.id || ''
 }
 
-function preview(item: Conversation) {
+function preview(item: AgentConversation) {
   const latest = item.messages.at(-1)?.content || '等待提问'
   return latest.replace(/\s+/g, ' ').slice(0, 28)
 }
 
-function recordTime(value: number) {
+function recordTime(value: string) {
   const time = new Date(value)
   const today = new Date()
   if (time.toDateString() === today.toDateString()) return time.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
@@ -127,20 +82,21 @@ async function scrollToBottom() {
 
 async function ask(value = question.value) {
   const content = value.trim()
-  if (!content || asking.value) return
+  if (!content || asking.value || !activeConversation.value.id) return
   const threadId = activeConversation.value.id
-  const previousHistory = history.value
   appendMessage({ role: 'user', content })
   if (activeConversation.value.title === '新行情问答') {
     activeConversation.value.title = content.slice(0, 18)
-    persist()
   }
   question.value = ''
   asking.value = true
   await scrollToBottom()
   try {
-    const result = await apiClient.askAgent(content, previousHistory)
-    if (activeConversationId.value === threadId) appendMessage({ role: 'assistant', content: result.answer, sources: result.sources })
+    const result = await apiClient.askAgent(content, threadId)
+    if (activeConversationId.value === threadId) {
+      activeConversation.value.memory = result.memory
+      appendMessage({ role: 'assistant', content: result.answer, sources: result.sources })
+    }
   } catch (error) {
     if (activeConversationId.value === threadId) appendMessage({
       role: 'assistant',
@@ -152,7 +108,16 @@ async function ask(value = question.value) {
   }
 }
 
-onMounted(scrollToBottom)
+onMounted(async () => {
+  try {
+    conversations.value = await apiClient.agentConversations()
+    if (!conversations.value.length) conversations.value = [await apiClient.createAgentConversation()]
+    activeConversationId.value = conversations.value[0].id
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  }
+  await scrollToBottom()
+})
 </script>
 
 <template>
@@ -165,10 +130,10 @@ onMounted(scrollToBottom)
     <div class="agent-layout">
       <aside class="agent-thread-panel">
         <button class="agent-new-thread" type="button" :disabled="asking" @click="newConversation">＋ 新建对话</button>
-        <div class="agent-thread-title"><span>对话记录</span><small>保存在当前浏览器</small></div>
+        <div class="agent-thread-title"><span>对话记录</span><small>已持久化</small></div>
         <div class="agent-thread-list">
           <button v-for="item in conversations" :key="item.id" :class="['agent-thread', { active: item.id === activeConversationId }]" type="button" :disabled="asking" @click="selectConversation(item.id)">
-            <b>{{ item.title }}</b><span>{{ preview(item) }}</span><time>{{ recordTime(item.updatedAt) }}</time>
+            <b>{{ item.title }}</b><span>{{ preview(item) }}</span><time>{{ recordTime(item.updated_at) }}</time>
             <i title="删除对话" @click.stop="removeConversation(item.id)">×</i>
           </button>
         </div>
@@ -217,6 +182,13 @@ onMounted(scrollToBottom)
             <div><dt>已发布报价</dt><dd>{{ market.dashboard?.published_quotes || 0 }} 条</dd></div>
             <div><dt>等待复核</dt><dd>{{ market.dashboard?.pending_candidates || 0 }} 条</dd></div>
           </dl>
+        </section>
+        <section class="agent-boundary">
+          <span>当前记忆</span>
+          <dl v-if="Object.keys(activeConversation.memory).length" class="agent-memory-list">
+            <div v-for="(value, key) in activeConversation.memory" :key="key"><dt>{{ { brand: '品牌', model: '型号', storage: '容量', color: '颜色', last_question: '上次问题' }[key] || key }}</dt><dd>{{ value }}</dd></div>
+          </dl>
+          <p v-else>提问后将记录当前会话的查询条件</p>
         </section>
         <section class="agent-boundary">
           <span>回答范围</span>

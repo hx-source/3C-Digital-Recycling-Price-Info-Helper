@@ -3,7 +3,7 @@ import { computed, nextTick, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { apiClient, errorMessage } from '../api'
 import { useMarketStore } from '../stores/market'
-import type { ExcelPrecheckIssue, ExcelPrecheckResult, ImportAgentSummaryRequest, ImportAgentSummaryResponse } from '../types'
+import type { ExcelPrecheckIssue, ExcelPrecheckResult, ImportAgentSummaryRequest, ImportAgentSummaryResponse, ImportTask } from '../types'
 
 const emit = defineEmits<{ navigate: [view: 'review'] }>()
 const market = useMarketStore()
@@ -15,6 +15,7 @@ type QueueItem = {
   file: File
   status: QueueStatus
   progress: number
+  stage?: string
   uploadCompleted?: boolean
   candidateCount?: number
   error?: string
@@ -32,6 +33,8 @@ const importAgentSummary = ref<ImportAgentSummaryResponse | null>(null)
 const summarizing = ref(false)
 const inspection = ref<PrecheckInspection>('normal')
 const inspectionPanel = ref<HTMLElement | null>(null)
+const activeTaskId = ref<string | null>(null)
+const activeTaskQueueIndexes = ref<number[]>([])
 let summaryRequestId = 0
 
 const imageFiles = computed(() => queue.value.filter(item => item.file.type.startsWith('image/')))
@@ -149,16 +152,26 @@ async function requestImportSummary(payload: ImportAgentSummaryRequest, guard?: 
   }
 }
 
-function animateToComplete(item: QueueItem) {
-  return new Promise<void>(resolve => {
-    const timer = window.setInterval(() => {
-      item.progress = Math.min(100, item.progress + Math.max(2, Math.ceil((100 - item.progress) * 0.14)))
-      if (item.progress === 100) {
-        window.clearInterval(timer)
-        resolve()
-      }
-    }, 28)
+function applyTaskState(task: ImportTask) {
+  task.items.forEach(taskItem => {
+    const item = queue.value[activeTaskQueueIndexes.value[taskItem.position] ?? taskItem.position]
+    if (!item) return
+    item.progress = Math.max(item.progress, taskItem.progress)
+    item.stage = taskItem.stage
+    item.status = taskItem.status === 'queued' ? 'waiting' : taskItem.status
+    item.candidateCount = taskItem.candidate_count ?? undefined
+    item.error = taskItem.error_message ?? undefined
   })
+}
+
+async function pollTask(taskId: string) {
+  while (activeTaskId.value === taskId) {
+    const task = await apiClient.importTask(taskId)
+    applyTaskState(task)
+    if (['completed', 'partial_failed', 'failed'].includes(task.status)) return task
+    await new Promise(resolve => window.setTimeout(resolve, 700))
+  }
+  throw new Error('导入任务已取消')
 }
 
 async function requestExcelPrecheck() {
@@ -195,49 +208,45 @@ async function requestExcelPrecheck() {
 async function runQueue(excelImportMode: ExcelImportMode = 'all') {
   const itemsToProcess = queue.value.filter(item => item.status === 'waiting' || item.status === 'failed')
   if (!itemsToProcess.length) return
+  const retryExisting = Boolean(activeTaskId.value) && itemsToProcess.every(item => item.status === 'failed')
   const currentSource = sourceName.value
   const currentDate = quoteDate.value
   const currentManualText = canUseManualText.value ? manualText.value.trim() : ''
   uploading.value = true
-  for (const item of itemsToProcess) {
+  itemsToProcess.forEach(item => {
     item.status = 'processing'
-    item.progress = 1
-    item.uploadCompleted = false
+    item.progress = 0
+    item.stage = 'uploading'
     item.error = undefined
     item.candidateCount = undefined
-    const form = new FormData()
-    form.append('file', item.file)
-    form.append('source_name', currentSource)
-    if (currentDate) form.append('quote_date', currentDate)
-    if (currentManualText) form.append('manual_text', currentManualText)
-    if (/\.(xlsx|xlsm)$/i.test(item.file.name)) form.append('excel_import_mode', excelImportMode)
-    const recognitionProgress = window.setInterval(() => {
-      if (!item.uploadCompleted || item.status !== 'processing' || item.progress >= 95) return
-      item.progress = Math.min(95, item.progress + Math.max(1, Math.ceil((95 - item.progress) * 0.055)))
-    }, 480)
-    try {
-      const batch = await apiClient.upload(form, (percent, completed) => {
-        item.progress = Math.max(item.progress, percent)
-        item.uploadCompleted = completed
+  })
+  try {
+    let task: ImportTask
+    if (activeTaskId.value && retryExisting) {
+      task = await apiClient.retryImportTask(activeTaskId.value)
+    } else {
+      const form = new FormData()
+      activeTaskQueueIndexes.value = itemsToProcess.map(item => queue.value.indexOf(item))
+      itemsToProcess.forEach(item => form.append('files', item.file))
+      form.append('source_name', currentSource)
+      if (currentDate) form.append('quote_date', currentDate)
+      if (currentManualText) form.append('manual_text', currentManualText)
+      form.append('excel_import_mode', excelImportMode)
+      task = await apiClient.createImportTask(form, percent => {
+        itemsToProcess.forEach(item => { item.progress = Math.max(item.progress, Math.round(percent * 0.1)) })
       })
-      if (batch.status === 'review' || batch.status === 'committed') {
-        await animateToComplete(item)
-        item.status = 'completed'
-        item.candidateCount = batch.total_candidates
-      } else {
-        await animateToComplete(item)
-        item.status = 'failed'
-        item.error = batch.error_message || '识别未生成可复核结果'
-      }
-    } catch (error) {
-      await animateToComplete(item)
+      activeTaskId.value = task.id
+    }
+    applyTaskState(task)
+    await pollTask(task.id)
+  } catch (error) {
+    itemsToProcess.filter(item => item.status === 'processing').forEach(item => {
       item.status = 'failed'
       item.error = errorMessage(error)
-    } finally {
-      window.clearInterval(recognitionProgress)
-    }
+    })
+  } finally {
+    uploading.value = false
   }
-  uploading.value = false
   await market.refresh()
   const recognized = queue.value.filter(item => item.status === 'completed')
   const candidates = recognized.reduce((sum, item) => sum + (item.candidateCount || 0), 0)
@@ -266,7 +275,7 @@ async function confirmExcelImport(mode: ExcelImportMode) {
 }
 
 function statusLabel(item: QueueItem) {
-  if (item.status === 'processing') return item.progress < 20 ? `正在上传 ${item.progress}%` : `正在识别 ${item.progress}%`
+  if (item.status === 'processing') return item.stage === 'uploading' ? `正在上传 ${item.progress}%` : item.stage === 'persisting' ? `正在入库 ${item.progress}%` : `正在解析 ${item.progress}%`
   if (item.status === 'completed') return `已完成 · ${item.candidateCount || 0} 条`
   if (item.status === 'failed') return '识别失败'
   return '等待识别'
@@ -338,6 +347,7 @@ function priceStatusLabel(status: string) {
               <small>{{ (item.file.size / 1024 / 1024).toFixed(2) }} MB</small>
               <em :title="item.error">{{ statusLabel(item) }}</em>
               <button v-if="!uploading" type="button" @click="removeFile(index)">移除</button>
+              <p v-if="item.error" class="queue-error">失败原因：{{ item.error }}</p>
             </li>
           </ul>
         </div>
@@ -372,7 +382,7 @@ function priceStatusLabel(status: string) {
           <footer><p>“仅导入正常记录”不会写入以上风险项；如需保留它们，请选择“全部进入复核”。</p><div><button type="button" class="ghost-action" :disabled="uploading" @click="confirmExcelImport('normal_only')">仅导入正常 {{ excelPrecheck.normal_candidates }} 条</button><button type="button" class="primary-action compact" :disabled="uploading" @click="confirmExcelImport('all')">全部 {{ excelPrecheck.total_candidates }} 条进入复核</button></div></footer>
         </section>
         <div v-if="uploading || processedCount" class="recognition-progress wide" aria-live="polite">
-          <div><strong>{{ uploading ? `${currentItem && currentItem.progress < 20 ? '正在上传' : '正在识别'} ${processedCount + 1} / ${queue.length} 个文件` : `识别完成 ${completedCount} / ${queue.length} 个文件` }}</strong><span>{{ progressPercent }}%</span></div>
+          <div><strong>{{ uploading ? `${currentItem?.stage === 'uploading' ? '正在上传' : currentItem?.stage === 'persisting' ? '正在入库' : '正在解析'} ${processedCount + 1} / ${queue.length} 个文件` : `识别完成 ${completedCount} / ${queue.length} 个文件` }}</strong><span>{{ progressPercent }}%</span></div>
           <div class="progress-track"><i :style="{ width: `${progressPercent}%` }"></i></div>
           <p v-if="currentItem">当前：{{ currentItem.file.name }} · {{ currentItem.progress }}%</p>
           <p v-else-if="failedCount">{{ failedCount }} 个文件识别失败，可点击下方按钮重试。</p>
