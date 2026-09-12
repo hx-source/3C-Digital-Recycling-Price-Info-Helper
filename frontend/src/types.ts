@@ -225,6 +225,62 @@ export interface AgentMessageInput {
 export interface AgentSource {
   label: string
   detail: string
+  url?: string | null
+}
+
+export interface ForecastHistoryPoint {
+  quote_date: string
+  price: string
+}
+
+export interface ForecastPoint {
+  horizon_days: number
+  target_date: string
+  predicted_price: string
+  lower_price: string
+  upper_price: string
+  direction: 'up' | 'stable' | 'down'
+  up_probability: number
+  stable_probability: number
+  down_probability: number
+  confidence: number
+}
+
+export interface ExternalMarketSignal {
+  title: string
+  url: string
+  snippet: string | null
+  source_type: 'official' | 'ecommerce' | 'secondhand' | 'news' | 'other'
+  source_domain: string | null
+  published_at: string | null
+}
+
+export interface PriceForecast {
+  model_key: string
+  brand: string
+  model: string
+  storage: string | null
+  color: string | null
+  variant: string | null
+  base_date: string
+  base_price: string
+  sample_count: number
+  history: ForecastHistoryPoint[]
+  forecasts: ForecastPoint[]
+  external_signals: ExternalMarketSignal[]
+  external_score: number
+  explanation: string
+  factors: string[]
+  generated_by_model: boolean
+  alternatives: Array<{ model_key: string; label: string; latest_price: string; latest_date: string }>
+  workflow_steps: string[]
+}
+
+export interface ForecastBacktest {
+  evaluated_count: number
+  direction_accuracy: number | null
+  interval_hit_rate: number | null
+  mean_absolute_error: string | null
 }
 
 export interface AgentChatResponse {

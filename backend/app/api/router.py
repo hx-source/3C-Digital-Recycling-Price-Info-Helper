@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import agent, dashboard, imports, monitor, quotes
+from app.api.routes import agent, dashboard, forecasts, imports, monitor, quotes
 
 
 api_router = APIRouter()
@@ -9,3 +9,4 @@ api_router.include_router(quotes.router, prefix="/quotes", tags=["quotes"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(agent.router, prefix="/agent", tags=["agent"])
 api_router.include_router(monitor.router, prefix="/monitor", tags=["monitor"])
+api_router.include_router(forecasts.router, prefix="/forecasts", tags=["forecasts"])

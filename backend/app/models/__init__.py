@@ -1,3 +1,3 @@
-from app.models.entities import AgentConversation, AgentConversationMessage, ImportBatch, ImportTask, ImportTaskItem, MarketMonitorFinding, MarketMonitorRun, PriceQuote, QuoteCandidate, ReviewAuditLog, ReviewSample
+from app.models.entities import AgentConversation, AgentConversationMessage, ExternalMarketSignal, ImportBatch, ImportTask, ImportTaskItem, MarketMonitorFinding, MarketMonitorRun, PriceForecast, PriceQuote, QuoteCandidate, ReviewAuditLog, ReviewSample
 
-__all__ = ["AgentConversation", "AgentConversationMessage", "ImportBatch", "ImportTask", "ImportTaskItem", "MarketMonitorFinding", "MarketMonitorRun", "PriceQuote", "QuoteCandidate", "ReviewAuditLog", "ReviewSample"]
+__all__ = ["AgentConversation", "AgentConversationMessage", "ExternalMarketSignal", "ImportBatch", "ImportTask", "ImportTaskItem", "MarketMonitorFinding", "MarketMonitorRun", "PriceForecast", "PriceQuote", "QuoteCandidate", "ReviewAuditLog", "ReviewSample"]

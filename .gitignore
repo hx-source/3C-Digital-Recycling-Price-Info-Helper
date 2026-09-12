@@ -12,6 +12,9 @@ venv/
 # User-uploaded source files
 backend/storage/uploads/*
 !backend/storage/uploads/.gitkeep
+backend/storage/kdocs-auth-state.json
+backend/storage/kdocs-sync-state.json
+backend/storage/logs/
 
 # Frontend dependencies and generated bundles
 frontend/node_modules/

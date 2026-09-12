@@ -281,6 +281,68 @@ class TrendPoint(BaseModel):
     price: Decimal
 
 
+class ForecastHistoryPoint(BaseModel):
+    quote_date: date
+    price: Decimal
+
+
+class ForecastPointRead(BaseModel):
+    horizon_days: int
+    target_date: date
+    predicted_price: Decimal
+    lower_price: Decimal
+    upper_price: Decimal
+    direction: Literal["up", "stable", "down"]
+    up_probability: float
+    stable_probability: float
+    down_probability: float
+    confidence: float
+
+
+class ExternalSignalRead(BaseModel):
+    title: str
+    url: str
+    snippet: str | None = None
+    source_type: Literal["official", "ecommerce", "secondhand", "news", "other"]
+    source_domain: str | None = None
+    published_at: datetime | None = None
+
+
+class ForecastAlternativeRead(BaseModel):
+    model_key: str
+    label: str
+    latest_price: Decimal
+    latest_date: date
+
+
+class PriceForecastResponse(BaseModel):
+    model_key: str
+    brand: str
+    model: str
+    storage: str | None
+    color: str | None
+    variant: str | None
+    base_date: date
+    base_price: Decimal
+    sample_count: int
+    history: list[ForecastHistoryPoint]
+    forecasts: list[ForecastPointRead]
+    external_signals: list[ExternalSignalRead]
+    external_score: float
+    explanation: str
+    factors: list[str]
+    generated_by_model: bool
+    alternatives: list[ForecastAlternativeRead] = Field(default_factory=list)
+    workflow_steps: list[str] = Field(default_factory=list)
+
+
+class ForecastBacktestResponse(BaseModel):
+    evaluated_count: int
+    direction_accuracy: float | None
+    interval_hit_rate: float | None
+    mean_absolute_error: Decimal | None
+
+
 class DashboardSummary(BaseModel):
     latest_quote_date: date | None
     published_quotes: int
@@ -306,6 +368,7 @@ class AgentChatRequest(BaseModel):
 class AgentSource(BaseModel):
     label: str
     detail: str
+    url: str | None = None
 
 
 class AgentChatResponse(BaseModel):

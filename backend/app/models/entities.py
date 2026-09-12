@@ -231,6 +231,65 @@ class PriceQuote(Base):
     candidate: Mapped[QuoteCandidate] = relationship(back_populates="quote")
 
 
+class PriceForecast(Base):
+    __tablename__ = "price_forecasts"
+    __table_args__ = (
+        UniqueConstraint("model_key", "base_date", "horizon_days", name="uq_forecast_spec_base_horizon"),
+        Index("ix_forecast_target_date", "target_date"),
+        Index("ix_forecast_spec_created", "model_key", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    model_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    brand: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(180), nullable=False)
+    storage: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    variant: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    base_date: Mapped[date] = mapped_column(Date, nullable=False)
+    target_date: Mapped[date] = mapped_column(Date, nullable=False)
+    horizon_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    predicted_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    lower_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    upper_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    direction: Mapped[str] = mapped_column(String(20), nullable=False)
+    up_probability: Mapped[float] = mapped_column(Float, nullable=False)
+    stable_probability: Mapped[float] = mapped_column(Float, nullable=False)
+    down_probability: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    method: Mapped[str] = mapped_column(String(80), nullable=False, default="robust-trend-v1")
+    external_score: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    external_signal_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    factors: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    actual_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    absolute_error: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+class ExternalMarketSignal(Base):
+    __tablename__ = "external_market_signals"
+    __table_args__ = (
+        UniqueConstraint("url_hash", name="uq_external_signal_url_hash"),
+        Index("ix_external_signal_query_collected", "query", "collected_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    url_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    impact_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
 class ReviewAuditLog(Base):
     __tablename__ = "review_audit_logs"
     __table_args__ = (

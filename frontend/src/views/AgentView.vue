@@ -22,13 +22,14 @@ const emptyConversation: AgentConversation = { id: '', title: '新行情问答',
 const conversations = ref<AgentConversation[]>([])
 const activeConversationId = ref('')
 const activeConversation = computed(() => conversations.value.find(item => item.id === activeConversationId.value) || conversations.value[0] || emptyConversation)
-const greeting: AgentConversationMessage = { id: -1, role: 'assistant', content: '我是你的行情问答助手。我会记住当前对话中的品牌、型号、容量和日期条件，你可以继续问“它和昨天比怎么样”。', sources: null, tools_used: null, created_at: '' }
+const greeting: AgentConversationMessage = { id: -1, role: 'assistant', content: '我是你的行情调查与预测助手。我会记住当前对话中的品牌、型号、容量、颜色和日期条件，也能调用历史报价、预测与公开信息搜索工具。', sources: null, tools_used: null, created_at: '' }
 const messages = computed(() => activeConversation.value.messages.length ? activeConversation.value.messages : [greeting])
 const suggestedQuestions = [
   '今天整体行情怎么样？',
   '今天跌得最多的 5 个型号有哪些？',
   '有哪些涨跌超过 500 元的异常报价？',
   '查一下红米 K80 的最新报价',
+  '预测红米 K80 12+256 黑色未来 3 天的回收价',
 ]
 
 function appendMessage(message: Omit<ChatMessage, 'id'>) {
@@ -123,7 +124,7 @@ onMounted(async () => {
 <template>
   <section class="view-panel agent-view">
     <div class="section-heading agent-heading">
-      <div><h2>行情智能问答</h2><p>问价格、涨跌和异常；回答只基于已发布报价。</p></div>
+      <div><h2>行情智能问答</h2><p>问价格、涨跌、异常和未来走势；内部报价与公开参考会明确区分。</p></div>
       <div class="agent-model-state"><i></i><span>本地模型</span><strong>Qwen2.5 7B</strong></div>
     </div>
 
@@ -142,7 +143,7 @@ onMounted(async () => {
       <section class="agent-chat-card">
         <header>
           <div><span>{{ activeConversation.title }}</span><strong>直接用自然语言问行情</strong></div>
-          <small>每次回答都会查询数据库</small>
+          <small>自动选择数据库、预测与公开搜索工具</small>
         </header>
 
         <div ref="conversation" class="agent-conversation">
@@ -152,7 +153,10 @@ onMounted(async () => {
               <p>{{ message.content }}</p>
               <div v-if="message.sources?.length" class="agent-sources">
                 <small>本次回答依据</small>
-                <div v-for="source in message.sources" :key="`${source.label}-${source.detail}`">
+                <a v-for="source in message.sources.filter(item => item.url)" :key="`${source.label}-${source.detail}`" :href="source.url || '#'" target="_blank" rel="noopener noreferrer">
+                  <b>{{ source.label }}</b><span>{{ source.detail }}</span><em>打开来源 ↗</em>
+                </a>
+                <div v-for="source in message.sources.filter(item => !item.url)" :key="`${source.label}-${source.detail}`">
                   <b>{{ source.label }}</b><span>{{ source.detail }}</span>
                 </div>
               </div>
@@ -194,6 +198,8 @@ onMounted(async () => {
           <span>回答范围</span>
           <ul>
             <li>查询已发布的报价和涨跌</li>
+            <li>预测未来 1、3、7、10 天价格区间</li>
+            <li>检索公开市场信息并给出依据</li>
             <li>定位大幅波动的异常记录</li>
             <li>说明数据不足时，不会猜测价格</li>
           </ul>

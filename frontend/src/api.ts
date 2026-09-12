@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AgentChatResponse, AgentConversation, AgentMessageInput, Batch, Candidate, CandidatePage, CandidateSourcePreview, DashboardSummary, ExcelPrecheckResult, ImportAgentSummaryRequest, ImportAgentSummaryResponse, ImportTask, MarketMonitorRun, PriceChange, PriceStatus, Quote, ReviewAuditLog, ReviewBatchApproveSafeResponse, ReviewBatchDiagnosis, ReviewDiagnosis, ReviewDiagnosisApplyRequest, ReviewDiagnosisApplyResponse, ReviewQualityStats, ReviewSample, ReviewSampleQueueResponse, ReviewStatus } from './types'
+import type { AgentChatResponse, AgentConversation, AgentMessageInput, Batch, Candidate, CandidatePage, CandidateSourcePreview, DashboardSummary, ExcelPrecheckResult, ForecastBacktest, ImportAgentSummaryRequest, ImportAgentSummaryResponse, ImportTask, MarketMonitorRun, PriceChange, PriceForecast, PriceStatus, Quote, ReviewAuditLog, ReviewBatchApproveSafeResponse, ReviewBatchDiagnosis, ReviewDiagnosis, ReviewDiagnosisApplyRequest, ReviewDiagnosisApplyResponse, ReviewQualityStats, ReviewSample, ReviewSampleQueueResponse, ReviewStatus } from './types'
 
 const api = axios.create({ baseURL: '/api/v1', timeout: 120_000 })
 
@@ -62,6 +62,12 @@ export const apiClient = {
   },
   async startMonitorRun() {
     return (await api.post<MarketMonitorRun>('/monitor/runs')).data
+  },
+  async priceForecast(query: string, withExternal = true, horizons = '1,3,7,10') {
+    return (await api.get<PriceForecast>('/forecasts/price', { params: { query, with_external: withExternal, horizons } })).data
+  },
+  async forecastBacktest(modelKey?: string) {
+    return (await api.get<ForecastBacktest>('/forecasts/backtest', { params: { model_key: modelKey || undefined } })).data
   },
   async diagnoseMonitorFinding(findingId: number) {
     return (await api.post<MarketMonitorRun['findings'][number]>(`/monitor/findings/${findingId}/diagnose`)).data

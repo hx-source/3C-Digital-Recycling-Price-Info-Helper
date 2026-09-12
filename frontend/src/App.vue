@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from 'vue'
 import { useMarketStore } from './stores/market'
 
-type ViewName = 'agent' | 'monitor' | 'dashboard' | 'import' | 'review' | 'quotes'
+type ViewName = 'agent' | 'forecast' | 'monitor' | 'dashboard' | 'import' | 'review' | 'quotes'
 
 const active = ref<ViewName>('agent')
 const market = useMarketStore()
@@ -10,6 +10,7 @@ const contentViewport = ref<HTMLElement | null>(null)
 
 const views = {
   agent: defineAsyncComponent(() => import('./views/AgentView.vue')),
+  forecast: defineAsyncComponent(() => import('./views/ForecastView.vue')),
   monitor: defineAsyncComponent(() => import('./views/MonitorView.vue')),
   dashboard: defineAsyncComponent(() => import('./views/DashboardView.vue')),
   import: defineAsyncComponent(() => import('./views/ImportView.vue')),
@@ -19,6 +20,7 @@ const views = {
 const activeComponent = computed(() => views[active.value])
 const viewTitle = computed(() => ({
   agent: '行情智能体',
+  forecast: '价格预测',
   monitor: '行情监控智能体',
   dashboard: '市场概览',
   import: '数据来源导入智能体',
@@ -28,6 +30,7 @@ const viewTitle = computed(() => ({
 
 const navItems: Array<{ key: ViewName; label: string; mark: string }> = [
   { key: 'agent', label: '智能问答', mark: '✦' },
+  { key: 'forecast', label: '价格预测', mark: '⌁' },
   { key: 'monitor', label: '行情监控', mark: '◎' },
   { key: 'dashboard', label: '市场概览', mark: '◫' },
   { key: 'import', label: '来源导入', mark: '↥' },
@@ -65,7 +68,7 @@ onMounted(() => market.refresh())
 
     </aside>
 
-    <main :class="['main-stage', { 'agent-stage': active === 'agent' }]">
+    <main :class="['main-stage', { 'agent-stage': active === 'agent', 'forecast-stage': active === 'forecast' }]">
       <header class="topbar">
         <div class="topbar-title"><span class="topbar-rail"></span><h1>{{ viewTitle }}</h1></div>
         <div class="date-stamp">
@@ -74,7 +77,7 @@ onMounted(() => market.refresh())
         </div>
       </header>
 
-      <div ref="contentViewport" :class="['content-viewport', { 'agent-viewport': active === 'agent' }]">
+      <div ref="contentViewport" :class="['content-viewport', { 'agent-viewport': active === 'agent', 'forecast-viewport': active === 'forecast' }]">
         <component :is="activeComponent" @navigate="(view: ViewName) => (active = view)" />
       </div>
     </main>
